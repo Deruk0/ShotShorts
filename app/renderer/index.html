@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com" />
+  <title>program</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- TITLE BAR -->
+  <div class="titlebar">
+    <div class="titlebar-label" id="glitch-title"><span class="dot"></span> ПРОГРАММА</div>
+    <div class="titlebar-controls">
+      <button class="titlebar-btn" id="btn-minimize" title="Minimize">─</button>
+      <button class="titlebar-btn" id="btn-maximize" title="Maximize">□</button>
+      <button class="titlebar-btn close" id="btn-close" title="Close">✕</button>
+    </div>
+  </div>
+
+  <!-- APP LAYOUT -->
+  <div class="app-layout">
+    <div class="nav-tabs">
+      <button class="nav-tab active" data-tab="generator">⚡ Generator</button>
+      <button class="nav-tab" data-tab="settings">⚙ Settings</button>
+    </div>
+
+    <!-- GENERATOR TAB -->
+    <div class="tab-content" id="tab-generator">
+      <div class="generate-section">
+
+        <div>
+          <div class="section-title">Source Video (with stories)</div>
+          <div class="file-picker" id="pick-source">
+            <div>
+              <span class="label" id="source-label">Click to select the source video file…</span>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-title">Background Videos Folder</div>
+          <div class="file-picker" id="pick-background">
+            <div>
+              <span class="label" id="bg-label">Click to select the ADHD background videos folder…</span>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-title">Output Folder</div>
+          <div class="file-picker" id="pick-output">
+            <div>
+              <span class="label" id="output-label">Click to select where to save generated videos…</span>
+            </div>
+          </div>
+        </div>
+
+        <p class="warning" id="no-keys-warning" style="display:none">Add at least one Gemini API key in Settings before generating.</p>
+
+        <div id="progress-container" class="progress-container" style="display:none">
+          <div class="progress-step" id="progress-step"></div>
+          <div class="progress-message" id="progress-message"></div>
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
+          </div>
+          <div class="progress-percent" id="progress-percent">0%</div>
+          <div class="progress-eta" id="progress-eta">Осталось: --:--</div>
+        </div>
+
+        <button class="btn btn-primary generate-btn" id="btn-generate" disabled>⚡ Generate Videos ⚡</button>
+        <button class="btn btn-danger generate-btn" id="btn-cancel" style="display:none">Cancel</button>
+      </div>
+    </div>
+
+    <!-- SETTINGS TAB -->
+    <div class="tab-content" id="tab-settings" style="display:none">
+
+      <div class="settings-section">
+        <div class="section-title">Gemini API Keys</div>
+        <div class="input-row">
+          <input type="password" id="key-input" placeholder="AIzaSy…  paste API key here" />
+          <button class="btn btn-primary" id="btn-add-key" disabled>Add</button>
+        </div>
+        <div class="key-list" id="key-list"></div>
+        <p class="hint" id="keys-hint">Add at least one API key to use the generator. Keys rotate automatically on rate-limit errors.</p>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="settings-section">
+        <div class="section-title" style="justify-content:space-between">
+          <span>Proxy Configuration</span>
+          <label class="toggle-label"><input type="checkbox" id="proxy-toggle" /> Enable</label>
+        </div>
+        <div class="proxy-grid" id="proxy-fields" style="opacity:0.4;pointer-events:none">
+          <div class="field-group">
+            <label class="field-label">Type</label>
+            <select id="proxy-type">
+              <option value="http">HTTP</option>
+              <option value="https">HTTPS</option>
+              <option value="socks5">SOCKS5</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label class="field-label">Host</label>
+            <input type="text" id="proxy-host" placeholder="proxy.example.com" />
+          </div>
+          <div class="field-group">
+            <label class="field-label">Port</label>
+            <input type="text" id="proxy-port" placeholder="8080" />
+          </div>
+          <div class="field-group">
+            <label class="field-label">Username (optional)</label>
+            <input type="text" id="proxy-user" placeholder="user" />
+          </div>
+          <div class="field-group">
+            <label class="field-label">Password (optional)</label>
+            <input type="password" id="proxy-pass" placeholder="••••••••" />
+          </div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="settings-section">
+        <div class="section-title">Statistics</div>
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-value" id="stat-total">0</div>
+            <div class="stat-label">Total Videos</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="stat-time">0m</div>
+            <div class="stat-label">Total Render Time</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="stat-avg">0s</div>
+            <div class="stat-label">Avg Per Video</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="stat-last">—</div>
+            <div class="stat-label">Last Run</div>
+          </div>
+        </div>
+        <button class="btn btn-secondary" id="btn-reset-stats" style="margin-top:16px;font-size:10px;padding:8px 14px;">Reset Statistics</button>
+      </div>
+    </div>
+
+    <!-- STATUS BAR -->
+    <div class="status-bar">
+      <div class="status-indicator"><span class="status-dot idle" id="status-dot"></span> <span id="status-text">Ready</span></div>
+      <span id="key-count">0 API keys configured</span>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Temp
+.temp_ag_kit/
+antigravity-doc
+tests
+others
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# Electron build artifacts
+Ready_App_EXE/
+app/dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log

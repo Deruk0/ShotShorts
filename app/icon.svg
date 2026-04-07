@@ -1,0 +1,47 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" fill="#000000"/>
+  
+  <defs>
+    <style>
+      .txt {
+        font-family: 'Arial Black', Impact, 'Segoe UI Black', sans-serif;
+        font-weight: 900;
+        fill: #f97316;
+      }
+      .txt-r { font-size: 380px; }
+      .txt-s { font-size: 260px; }
+    </style>
+    <g id="logo-letters">
+      <text x="80" y="380" class="txt txt-r">R</text>
+      <text x="280" y="380" class="txt txt-s">s</text>
+    </g>
+  </defs>
+
+  <!-- Top Region (shifted left) -->
+  <g transform="translate(-16, 0)">
+    <clipPath id="top-clip">
+      <rect x="-50" y="0" width="600" height="180"/>
+    </clipPath>
+    <use href="#logo-letters" clip-path="url(#top-clip)"/>
+    <!-- Top glitch cut line stretching left -->
+    <rect x="-50" y="174" width="370" height="6" fill="#f97316"/>
+  </g>
+
+  <!-- Middle Region (no shift) -->
+  <g>
+    <clipPath id="mid-clip">
+      <rect x="0" y="188" width="512" height="132"/>
+    </clipPath>
+    <use href="#logo-letters" clip-path="url(#mid-clip)"/>
+  </g>
+
+  <!-- Bottom Region (shifted right) -->
+  <g transform="translate(16, 0)">
+    <clipPath id="bot-clip">
+      <rect x="0" y="328" width="512" height="184"/>
+    </clipPath>
+    <use href="#logo-letters" clip-path="url(#bot-clip)"/>
+    <!-- Bottom glitch cut line stretching right -->
+    <rect x="220" y="328" width="350" height="6" fill="#f97316"/>
+  </g>
+</svg>
