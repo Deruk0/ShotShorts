@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the Antigravity Kit will be documented in this file.
+All notable changes to ShotShorts will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/2.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -56,12 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Initial Release
 
-- Initial release of Antigravity Kit
+- Initial release of ShotShorts
 - 20 specialized AI agents
 - 37 domain-specific skills
 - 11 workflow slash commands
 - CLI tool for easy installation and updates
 - Comprehensive documentation and architecture guide
 
-[Unreleased]: https://github.com/vudovn/antigravity-kit/compare/v2.0.0...HEAD
-[2.0.0]: https://github.com/vudovn/antigravity-kit/releases/tag/v2.0.0
+[Unreleased]: https://github.com/Deruk0/ShotShorts/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/Deruk0/ShotShorts/releases/tag/v2.0.0

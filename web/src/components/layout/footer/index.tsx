@@ -48,12 +48,12 @@ export default function Footer() {
                                 </Link>
                             </li>
                             <li>
-                                <a href="https://github.com/vudovn/antigravity-kit" target="_blank" rel="noopener noreferrer" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors">
+                                <a href="https://github.com/Deruk0/ShotShorts" target="_blank" rel="noopener noreferrer" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors">
                                     Examples
                                 </a>
                             </li>
                             <li>
-                                <a href="https://github.com/vudovn/antigravity-kit/releases" target="_blank" rel="noopener noreferrer" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors">
+                                <a href="https://github.com/Deruk0/ShotShorts/releases" target="_blank" rel="noopener noreferrer" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors">
                                     Changelog
                                 </a>
                             </li>
@@ -65,22 +65,22 @@ export default function Footer() {
                         <h3 className="font-semibold text-zinc-900 dark:text-zinc-50 mb-4">Community</h3>
                         <ul className="space-y-3 text-sm">
                             <li>
-                                <a href="https://github.com/vudovn/antigravity-kit" target="_blank" rel="noopener noreferrer" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors">
+                                <a href="https://github.com/Deruk0/ShotShorts" target="_blank" rel="noopener noreferrer" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors">
                                     GitHub
                                 </a>
                             </li>
                             <li>
-                                <a href="https://github.com/vudovn/antigravity-kit/issues" target="_blank" rel="noopener noreferrer" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors">
+                                <a href="https://github.com/Deruk0/ShotShorts/issues" target="_blank" rel="noopener noreferrer" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors">
                                     Issues
                                 </a>
                             </li>
                             <li>
-                                <a href="https://github.com/vudovn/antigravity-kit/discussions" target="_blank" rel="noopener noreferrer" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors">
+                                <a href="https://github.com/Deruk0/ShotShorts/discussions" target="_blank" rel="noopener noreferrer" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors">
                                     Discussions
                                 </a>
                             </li>
                             <li>
-                                <a href="https://github.com/vudovn/antigravity-kit/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors">
+                                <a href="https://github.com/Deruk0/ShotShorts/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors">
                                     Contributing
                                 </a>
                             </li>
@@ -92,7 +92,7 @@ export default function Footer() {
                         <h3 className="font-semibold text-zinc-900 dark:text-zinc-50 mb-4">Legal</h3>
                         <ul className="space-y-3 text-sm">
                             <li>
-                                <a href="https://github.com/vudovn/antigravity-kit/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors">
+                                <a href="https://github.com/Deruk0/ShotShorts/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors">
                                     License
                                 </a>
                             </li>
@@ -114,20 +114,20 @@ export default function Footer() {
                 <div className="pt-8 border-t border-zinc-200 dark:border-zinc-800 flex flex-col sm:flex-row items-center justify-between gap-4">
                     {/* Copyright */}
                     <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                        © {new Date().getFullYear()} Antigravity Kit by{" "}
+                        © {new Date().getFullYear()} ShotShorts by{" "}
                         <a
-                            href="https://github.com/vudovn"
+                            href="https://github.com/Deruk0"
                             target="_blank"
                             rel="noopener noreferrer"
                             className="font-medium text-zinc-900 dark:text-zinc-50 hover:underline">
-                            @vudovn
+                            @Deruk0
                         </a>. All rights reserved.
                     </p>
 
                     {/* Social Links */}
                     <div className="flex items-center gap-4">
                         <a
-                            href="https://github.com/vudovn/antigravity-kit"
+                            href="https://github.com/Deruk0/ShotShorts"
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors"

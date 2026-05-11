@@ -502,7 +502,7 @@ export default function Home() {
         <div className="col-span-1 flex flex-col justify-end p-8 bg-zinc-950 md:col-span-4 gap-4">
           <a
             className="flex h-16 w-full items-center justify-between border border-zinc-700 bg-black px-6 text-sm uppercase tracking-wider text-white transition-all hover:border-orange-500 hover:text-orange-500 focus:outline-none focus:ring-2 focus:ring-orange-500"
-            href="https://github.com/vudovn/antigravity-kit"
+            href="https://github.com/Deruk0/ShotShorts"
             target="_blank"
             rel="noopener noreferrer"
           >

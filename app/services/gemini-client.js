@@ -1,14 +1,20 @@
+const { GoogleGenerativeAI, GoogleAIFileManager } = require('@google/generative-ai');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { SocksProxyAgent } = require('socks-proxy-agent');
-const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
 class GeminiClient {
-  static MODELS = ['gemini-2.5-pro', 'gemini-3-flash-preview', 'gemini-2.0-flash', 'gemini-3.1-flash-lite-preview'];
+  static MODELS = [
+    'gemini-2.5-flash',
+    'gemini-2.5-pro',
+    'gemini-2.0-flash',
+    'gemini-2.0-flash-lite',
+    'gemini-1.5-pro',
+    'gemini-1.5-flash',
+  ];
   static DEFAULT_RETRY_DELAY_MS = 40_000;
   static MAX_RATE_LIMIT_WAITS = 3;
-  static API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
   static _keyCooldowns = new Map();
   static _keyUsageCount = new Map();
@@ -96,98 +102,57 @@ class GeminiClient {
     GeminiClient._keyUsageCount.set(apiKey, count + 1);
   }
 
-  _buildAgent() {
+  _getMimeType(filePath) {
+    const ext = path.extname(filePath).toLowerCase();
+    const mimeMap = {
+      '.mp3': 'audio/mpeg',
+      '.wav': 'audio/wav',
+      '.ogg': 'audio/ogg',
+      '.m4a': 'audio/mp4',
+      '.aac': 'audio/aac',
+      '.flac': 'audio/flac',
+      '.webm': 'audio/webm'
+    };
+    return mimeMap[ext] || 'audio/mpeg';
+  }
+
+  _buildFetchOptions() {
     if (!this.proxy || !this.proxy.host) return undefined;
     const { type = 'http', host, port, username, password } = this.proxy;
     const cleanHost = host.replace(/^(https?|socks\d?):\/\//i, '');
+    const encUser = username ? encodeURIComponent(String(username)) : '';
+    const encPass = password ? encodeURIComponent(String(password)) : '';
 
     if (type === 'socks5') {
       const url = username
-        ? `socks5://${username}:${password}@${cleanHost}:${port}`
+        ? `socks5://${encUser}:${encPass}@${cleanHost}:${port}`
         : `socks5://${cleanHost}:${port}`;
-      return new SocksProxyAgent(url);
+      return { agent: new SocksProxyAgent(url) };
     }
 
     const proto = type === 'https' ? 'https' : 'http';
     const url = username
-      ? `${proto}://${username}:${password}@${cleanHost}:${port}`
+      ? `${proto}://${encUser}:${encPass}@${cleanHost}:${port}`
       : `${proto}://${cleanHost}:${port}`;
-    return new HttpsProxyAgent(url);
+    return { agent: new HttpsProxyAgent(url) };
   }
 
-  // Direct HTTPS request — bypasses SDK's fetch which ignores proxy agents
-  _makeRequest(url, body, agent, onProgress) {
-    return new Promise((resolve, reject) => {
-      onProgress?.('Preparing request...');
-      const parsed = new URL(url);
-      const postData = JSON.stringify(body);
+  async _uploadAudio(apiKey, audioFilePath, onProgress) {
+    const mimeType = this._getMimeType(audioFilePath);
+    console.log(`[GeminiClient] Uploading audio to File API: ${audioFilePath}, mime: ${mimeType}`);
+    onProgress?.('Uploading audio to Google…');
 
-      const options = {
-        hostname: parsed.hostname,
-        port: parsed.port || 443,
-        path: parsed.pathname + parsed.search,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(postData)
-        }
-      };
-
-      if (agent) options.agent = agent;
-
-      let hasResponded = false;
-      let isConnected = false;
-
-      const req = https.request(options, (res) => {
-        hasResponded = true;
-        onProgress?.('Receiving response... (0%)');
-        const chunks = [];
-        res.on('data', chunk => chunks.push(chunk));
-        res.on('end', () => {
-          onProgress?.('Parsing response...');
-          const raw = Buffer.concat(chunks).toString('utf-8');
-          try {
-            const json = JSON.parse(raw);
-            if (res.statusCode !== 200) {
-              const errMsg = json.error?.message || `HTTP ${res.statusCode}`;
-              reject(new Error(`[${res.statusCode}] ${errMsg}`));
-            } else {
-              resolve(json);
-            }
-          } catch {
-            reject(new Error(`Invalid JSON response (HTTP ${res.statusCode}): ${raw.slice(0, 200)}`));
-          }
-        });
-      });
-
-      req.on('socket', (socket) => {
-        onProgress?.('Connecting to Google (via proxy)...');
-        socket.on('connect', () => {
-          isConnected = true;
-          onProgress?.('Connected! Uploading audio payload...');
-        });
-      });
-
-      req.on('error', reject);
-      
-      // Strict 30-second timeout for connection/initial response if proxy is dead
-      const timeoutId = setTimeout(() => {
-        if (!hasResponded) {
-          req.destroy();
-          reject(new Error(`Request timeout (${isConnected ? 'AI processing' : 'Proxy connection'} took more than 45s)`));
-        }
-      }, 45_000);
-
-      req.on('close', () => clearTimeout(timeoutId));
-
-      req.write(postData, () => {
-        onProgress?.('Upload complete. Awaiting AI response...');
-      });
-      req.end();
+    const fileManager = new GoogleAIFileManager(apiKey);
+    const uploadResult = await fileManager.uploadFile(audioFilePath, {
+      mimeType,
+      displayName: path.basename(audioFilePath),
     });
+
+    console.log(`[GeminiClient] File uploaded: ${uploadResult.file.uri}, state: ${uploadResult.file.state}`);
+    return uploadResult.file;
   }
 
-  async _tryWithModel(modelName, audioFilePath, audioBase64, mimeType, prompt, onProgress) {
+  async _tryWithModel(modelName, audioFilePath, prompt, onProgress) {
     const maxAttempts = this.keys.length * 2;
     let lastError = null;
     let rateLimitWaits = 0;
@@ -209,30 +174,29 @@ class GeminiClient {
       onProgress?.(`Initializing model ${modelName} (attempt ${attempt + 1}/${maxAttempts})`);
 
       try {
-        const agent = this._buildAgent();
-        if (agent) {
-          console.log(`[GeminiClient] Using proxy: ${this.proxy.type || 'http'}://${this.proxy.host}:${this.proxy.port}`);
-        }
+        // 1. Upload audio via File API
+        const uploadedFile = await this._uploadAudio(apiKey, audioFilePath, onProgress);
 
-        const url = `${GeminiClient.API_BASE}/${modelName}:generateContent?key=${apiKey}`;
-        const body = {
-          contents: [{
-            parts: [
-              { text: prompt },
-              { inlineData: { mimeType, data: audioBase64 } }
-            ]
-          }]
-        };
+        // 2. Generate content with file reference
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: modelName });
 
-        const json = await this._makeRequest(url, body, agent, onProgress);
+        onProgress?.('Analyzing audio with AI…');
+        const result = await model.generateContent([
+          { text: prompt },
+          { fileData: { mimeType: uploadedFile.mimeType, fileUri: uploadedFile.uri } }
+        ]);
 
-        const text = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        onProgress?.('Parsing AI response…');
+        const response = await result.response;
+        const text = response.text();
+
         const match = text.match(/\[[\s\S]*\]/);
         if (!match) throw new Error('Gemini response did not contain valid JSON array');
 
         const segments = JSON.parse(match[0]);
         this._recordSuccess(apiKey);
-        console.log(`[GeminiClient] ✓ Success with ${modelName} (key ${masked})`);
+        console.log(`[GeminiClient] ✓ Success with ${modelName} (key ${masked}), found ${segments.length} stories`);
 
         return segments.map((s, i) => {
           const st = Number(s.start) || 0;
@@ -246,11 +210,7 @@ class GeminiClient {
         }).filter(s => s.end > s.start);
       } catch (err) {
         lastError = err;
-
-        if (err.message.includes('[400]') || err.message.includes('[404]')) {
-          console.log(`[GeminiClient] Fatal error ${err.message}, aborting this model.`);
-          break;
-        }
+        console.error(`[GeminiClient] ✗ Model ${modelName} attempt ${attempt + 1} failed: ${err.message}`);
 
         if (this._isRateLimitError(err)) {
           const delayMs = this._parseRetryDelay(err);
@@ -268,27 +228,30 @@ class GeminiClient {
   async analyzeAudio(audioFilePath, onProgress) {
     GeminiClient.reset();
     onProgress?.('Reading optimized audio file...');
-    const audioBuffer = fs.readFileSync(audioFilePath);
-    const audioBase64 = audioBuffer.toString('base64');
-    const ext = path.extname(audioFilePath).toLowerCase();
-    const mimeMap = { '.mp3':'audio/mp3', '.wav':'audio/wav', '.ogg':'audio/ogg', '.m4a':'audio/mp4', '.aac':'audio/aac', '.flac':'audio/flac', '.webm':'audio/webm' };
-    const mimeType = mimeMap[ext] || 'audio/mp3';
 
-    const prompt = `You are an audio analyst. This audio file contains multiple Reddit stories narrated one after another.
-Between each story there is a distinct transition sound (like a "whoosh" or swoosh effect).
+    if (!fs.existsSync(audioFilePath)) {
+      throw new Error(`Audio file not found: ${audioFilePath}`);
+    }
+
+    const audioBuffer = fs.readFileSync(audioFilePath);
+    console.log(`[GeminiClient] Audio: ${audioFilePath}, size: ${audioBuffer.length} bytes, mime: ${this._getMimeType(audioFilePath)}`);
+
+    const prompt = `You are an audio analyst. This audio file contains multiple stories narrated one after another.
 
 Your task:
-1. Listen to the entire audio carefully.
-2. Identify each individual story by detecting the transition sounds between them.
+1. Listen to the entire audio carefully from start to finish.
+2. Identify EVERY individual story. Do NOT skip any story. Do NOT merge stories together.
 3. For each story, provide the START timestamp and END timestamp in seconds (decimal, e.g. 123.45).
-4. Give each story a short descriptive title based on the FIRST SENTENCE of the story. The title MUST be in Russian language.
+4. Give each story a VERY SHORT title (maximum 3-4 words) that captures the meaning of the FIRST SENTENCE of the story. The title MUST be in Russian language.
 
-IMPORTANT:
+IMPORTANT RULES:
 - The first story starts at 0.0 seconds (or close to it after any intro).
 - The last story ends at the end of the audio.
-- Be precise with timestamps — the transition sound marks the BOUNDARY between stories.
-- The title should be the first sentence of the story, translated to Russian.
-- Respond ONLY with valid JSON, no markdown, no explanation.
+- Every story MUST be in the output. Do not omit any story.
+- Do NOT merge multiple stories into one entry.
+- Be precise with timestamps — detect natural pauses, music changes, or transition sounds between stories.
+- The title MUST be very short (max 3-4 words) and based strictly on the first sentence of the story.
+- Respond ONLY with valid JSON array, no markdown, no explanation.
 
 Response format:
 [
@@ -301,13 +264,13 @@ Response format:
     for (const modelName of GeminiClient.MODELS) {
       console.log(`[GeminiClient] ▶ Trying model: ${modelName}`);
       onProgress?.(`Starting analysis with ${modelName}...`);
-      const result = await this._tryWithModel(modelName, audioFilePath, audioBase64, mimeType, prompt, onProgress);
+      const result = await this._tryWithModel(modelName, audioFilePath, prompt, onProgress);
       if (result && !result.failed) {
-        onProgress?.(`✓ Success! Decoded frames.`);
+        onProgress?.(`✓ Success! Found ${result.length} stories.`);
         return result;
       }
       lastError = result.error;
-      onProgress?.(`Error with ${modelName}: ${lastError?.message?.slice(0, 40) || 'Unknown'}. Trying fallback...`);
+      onProgress?.(`Error with ${modelName}: ${lastError?.message?.slice(0, 60) || 'Unknown'}. Trying fallback...`);
       console.log(`[GeminiClient] ✗ Model ${modelName} failed, trying next fallback...`);
     }
 

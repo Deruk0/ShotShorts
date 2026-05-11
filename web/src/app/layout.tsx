@@ -23,9 +23,9 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: "Antigravity Kit - AI Agent Capability Expansion Toolkit",
-  description: "A comprehensive collection of skills, rules, and workflows to supercharge AI coding assistants for Antigravity. 35+ skills, 57 UI Styles, production-ready workflows.",
-  metadataBase: new URL("https://antigravity-kit.vercel.app/"),
+  title: "ShotShorts - AI Video Generator",
+  description: "ShotShorts automatically finds stories in long videos using AI and creates vertical clips for TikTok, YouTube Shorts and Reels with ADHD background.",
+  metadataBase: new URL("https://shotshorts.vercel.app/"),
   robots: {
     index: true,
     follow: true,
@@ -33,8 +33,8 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     locale: "en_US",
-    url: "https://antigravity-kit.vercel.app/",
-    siteName: "Antigravity Kit",
+    url: "https://shotshorts.vercel.app/",
+    siteName: "ShotShorts",
     images: ["/images/logo.png"],
   },
 };

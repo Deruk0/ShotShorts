@@ -9,7 +9,7 @@ const segments = [
     { index: 6, title: 'Story Tiny', start: 600, end: 610 }
 ];
 
-const MIN_DUR = 120; // 2 minutes
+const MIN_DUR = 180; // 3 minutes
 const MAX_DUR = 240; // 4 minutes
 
 const finalEnd = segments[segments.length - 1].end;

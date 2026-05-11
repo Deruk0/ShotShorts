@@ -7,7 +7,7 @@
   <title>program</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&family=JetBrains+Mono:wght@400;700&family=Montserrat:wght@500;700&family=Oswald:wght@500;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -34,7 +34,7 @@
       <div class="generate-section">
 
         <div>
-          <div class="section-title">Source Video (with stories)</div>
+          <div class="section-title" id="txt-source-title">Source Video (with stories)</div>
           <div class="file-picker" id="pick-source">
             <div>
               <span class="label" id="source-label">Click to select the source video file…</span>
@@ -43,7 +43,7 @@
         </div>
 
         <div>
-          <div class="section-title">Background Videos Folder</div>
+          <div class="section-title" id="txt-bg-title">Background Videos Folder</div>
           <div class="file-picker" id="pick-background">
             <div>
               <span class="label" id="bg-label">Click to select the ADHD background videos folder…</span>
@@ -52,7 +52,7 @@
         </div>
 
         <div>
-          <div class="section-title">Output Folder</div>
+          <div class="section-title" id="txt-output-title">Output Folder</div>
           <div class="file-picker" id="pick-output">
             <div>
               <span class="label" id="output-label">Click to select where to save generated videos…</span>
@@ -81,7 +81,20 @@
     <div class="tab-content" id="tab-settings" style="display:none">
 
       <div class="settings-section">
-        <div class="section-title">Gemini API Keys</div>
+        <div class="section-title" id="txt-app-lang-title">App Language</div>
+        <div class="field-group">
+          <label class="field-label" id="txt-interface-lang-label">Interface Language</label>
+          <select id="app-language">
+            <option value="en" selected>English</option>
+            <option value="ru">Русский</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="settings-section">
+        <div class="section-title" id="txt-gemini-title">Gemini API Keys</div>
         <div class="input-row">
           <input type="password" id="key-input" placeholder="AIzaSy…  paste API key here" />
           <button class="btn btn-primary" id="btn-add-key" disabled>Add</button>
@@ -94,12 +107,12 @@
 
       <div class="settings-section">
         <div class="section-title" style="justify-content:space-between">
-          <span>Proxy Configuration</span>
-          <label class="toggle-label"><input type="checkbox" id="proxy-toggle" /> Enable</label>
+          <span id="txt-proxy-title">Proxy Configuration</span>
+          <label class="toggle-label"><input type="checkbox" id="proxy-toggle" /> <span id="txt-enable-proxy">Enable</span></label>
         </div>
         <div class="proxy-grid" id="proxy-fields" style="opacity:0.4;pointer-events:none">
           <div class="field-group">
-            <label class="field-label">Type</label>
+            <label class="field-label" id="txt-proxy-type">Type</label>
             <select id="proxy-type">
               <option value="http">HTTP</option>
               <option value="https">HTTPS</option>
@@ -107,19 +120,19 @@
             </select>
           </div>
           <div class="field-group">
-            <label class="field-label">Host</label>
+            <label class="field-label" id="txt-proxy-host">Host</label>
             <input type="text" id="proxy-host" placeholder="proxy.example.com" />
           </div>
           <div class="field-group">
-            <label class="field-label">Port</label>
+            <label class="field-label" id="txt-proxy-port">Port</label>
             <input type="text" id="proxy-port" placeholder="8080" />
           </div>
           <div class="field-group">
-            <label class="field-label">Username (optional)</label>
+            <label class="field-label" id="txt-proxy-user">Username (optional)</label>
             <input type="text" id="proxy-user" placeholder="user" />
           </div>
           <div class="field-group">
-            <label class="field-label">Password (optional)</label>
+            <label class="field-label" id="txt-proxy-pass">Password (optional)</label>
             <input type="password" id="proxy-pass" placeholder="••••••••" />
           </div>
         </div>
@@ -128,23 +141,143 @@
       <div class="divider"></div>
 
       <div class="settings-section">
-        <div class="section-title">Statistics</div>
+        <div class="section-title" style="justify-content:space-between">
+          <span id="txt-subtitles-title">Subtitles (Whisper AI)</span>
+          <label class="toggle-label"><input type="checkbox" id="subtitles-toggle" /> <span id="txt-enable-subtitles">Enable</span></label>
+        </div>
+        <div id="subtitle-fields" style="opacity:0.4;pointer-events:none">
+
+          <p class="hint" style="margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">1. Распознавание</p>
+          <div class="proxy-grid">
+            <div class="field-group">
+              <label class="field-label" id="txt-sub-model">Model Quality</label>
+              <select id="subtitle-model" class="strict-select">
+                <option value="medium" selected>Medium — accurate, ~1.5 GB (recommended)</option>
+                <option value="small">Small — faster, ~500 MB</option>
+                <option value="large">Large — best quality, ~3 GB</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label class="field-label" id="txt-sub-language">Language</label>
+              <select id="subtitle-language" class="strict-select">
+                <option value="ru" selected>Русский</option>
+                <option value="en">English</option>
+                <option value="uk">Українська</option>
+                <option value="de">Deutsch</option>
+                <option value="es">Español</option>
+                <option value="fr">Français</option>
+              </select>
+            </div>
+          </div>
+
+          <p class="hint" style="margin-top:16px;margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">2. Внешний вид</p>
+          <div class="proxy-grid">
+            <div class="field-group">
+              <label class="field-label" id="txt-sub-style">Style Preset</label>
+              <select id="subtitle-style" class="strict-select">
+                <option value="Classic">Classic (white + shadow)</option>
+                <option value="Minimal">Minimal (clean)</option>
+                <option value="Highlight">Highlight (yellow)</option>
+                <option value="TikTokBold">TikTok Bold (thick stroke)</option>
+                <option value="HeavyShadow">Heavy Shadow (extra dark)</option>
+                <option value="SoftBox">Soft Box (cinematic plate)</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label class="field-label" id="txt-sub-case">Case</label>
+              <select id="subtitle-case" class="strict-select">
+                <option value="sentence" selected>Sentence Case</option>
+                <option value="uppercase">UPPERCASE</option>
+                <option value="lowercase">lowercase</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label class="field-label" id="txt-sub-font-family">Font Family</label>
+              <select id="subtitle-font-family">
+                <option value="Inter" selected>Inter</option>
+                <option value="JetBrains Mono">JetBrains Mono</option>
+                <option value="Montserrat">Montserrat</option>
+                <option value="Oswald">Oswald</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label class="field-label" id="txt-sub-font">Font Size</label>
+              <input type="number" id="subtitle-font-size" min="12" max="72" value="20" />
+            </div>
+            <div class="field-group">
+              <label class="field-label" id="txt-sub-margin">Vertical Margin</label>
+              <input type="number" id="subtitle-margin-v" min="10" max="300" value="40" />
+            </div>
+          </div>
+
+          <p class="hint" style="margin-top:16px;margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">3. Макет</p>
+          <div class="proxy-grid">
+            <div class="field-group">
+              <label class="field-label" id="txt-sub-position">Position</label>
+              <select id="subtitle-position" class="strict-select">
+                <option value="bottom" selected>Bottom</option>
+                <option value="middle">Middle</option>
+                <option value="top">Top</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label class="field-label" id="txt-sub-words">Words Per Subtitle</label>
+              <input type="number" id="subtitle-words-per-line" min="1" max="8" value="3" />
+            </div>
+            <div class="field-group">
+              <label class="field-label" id="txt-sub-maxms">Max Line Duration (ms)</label>
+              <input type="number" id="subtitle-max-line-ms" min="300" max="3000" step="100" value="1200" />
+            </div>
+          </div>
+
+          <p class="hint" style="margin-top:16px;margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">4. Караоке</p>
+          <div class="proxy-grid">
+            <div class="field-group karaoke-row">
+              <div class="karaoke-right" style="display:flex; align-items:center;">
+                <label class="toggle-label" style="margin-left:auto;"><input type="checkbox" id="subtitle-karaoke" /> <span id="txt-sub-karaoke-word">Word highlight</span></label>
+              </div>
+              <div class="karaoke-left" style="flex:1; display:flex; flex-direction:column;">
+                <label class="field-label" id="txt-sub-karaoke">Karaoke Mode</label>
+                <div class="karaoke-modes" id="subtitle-karaoke-modes">
+                  <label class="toggle-label"><input type="checkbox" id="karaoke-mode-highlight" checked /> Highlight</label>
+                  <label class="toggle-label"><input type="checkbox" id="karaoke-mode-box" /> Red Box</label>
+                  <label class="toggle-label"><input type="checkbox" id="karaoke-mode-caps" /> Caps word</label>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="subtitle-preview-card">
+            <div class="subtitle-preview-head">Live Subtitle Preview</div>
+            <div class="subtitle-preview-stage" id="subtitle-preview-stage">
+              <div class="subtitle-preview-overlay" id="subtitle-preview-overlay">
+                <span id="subtitle-preview-text">Это предпросмотр субтитров</span>
+              </div>
+            </div>
+          </div>
+          <p class="hint" id="txt-sub-hint" style="margin-top:8px">First run will install PyTorch + openai-whisper and download the model automatically. Requires Python 3.9+ in PATH.</p>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="settings-section">
+        <div class="section-title" id="txt-stats-title">Statistics</div>
         <div class="stats-grid">
           <div class="stat-card">
             <div class="stat-value" id="stat-total">0</div>
-            <div class="stat-label">Total Videos</div>
+            <div class="stat-label" id="txt-stat-total">Total Videos</div>
           </div>
           <div class="stat-card">
             <div class="stat-value" id="stat-time">0m</div>
-            <div class="stat-label">Total Render Time</div>
+            <div class="stat-label" id="txt-stat-time">Total Render Time</div>
           </div>
           <div class="stat-card">
             <div class="stat-value" id="stat-avg">0s</div>
-            <div class="stat-label">Avg Per Video</div>
+            <div class="stat-label" id="txt-stat-avg">Avg Per Video</div>
           </div>
           <div class="stat-card">
             <div class="stat-value" id="stat-last">—</div>
-            <div class="stat-label">Last Run</div>
+            <div class="stat-label" id="txt-stat-last">Last Run</div>
           </div>
         </div>
         <button class="btn btn-secondary" id="btn-reset-stats" style="margin-top:16px;font-size:10px;padding:8px 14px;">Reset Statistics</button>

@@ -4,6 +4,14 @@ const fs = require('fs');
 const os = require('os');
 
 const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.avi', '.mov', '.webm', '.m4v']);
+const SRT_STYLE_PRESETS = {
+  Classic: { PrimaryColour: '&H00FFFFFF', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 1, Outline: 2, Shadow: 1, BorderStyle: 1 },
+  Minimal: { PrimaryColour: '&H00E5E7EB', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 0, Outline: 1.3, Shadow: 0.3, BorderStyle: 1 },
+  Highlight: { PrimaryColour: '&H0000FFFF', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 1, Outline: 2.6, Shadow: 2, BorderStyle: 1 },
+  TikTokBold: { PrimaryColour: '&H00FFFFFF', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 1, Outline: 3.2, Shadow: 2.4, BorderStyle: 1 },
+  HeavyShadow: { PrimaryColour: '&H00FFFFFF', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 1, Outline: 3.2, Shadow: 4.8, BorderStyle: 1 },
+  SoftBox: { PrimaryColour: '&H00F2F2F2', OutlineColour: '&H00202020', BackColour: '&H96000000', Bold: 1, Outline: 1.4, Shadow: 0.8, BorderStyle: 3 }
+};
 
 class MediaProcessor {
   constructor() {
@@ -44,13 +52,38 @@ class MediaProcessor {
   cancel() { this.cancelled = true; }
   reset() { this.cancelled = false; }
 
+  _buildSrtForceStyle(subtitleOptions = {}) {
+    const position = subtitleOptions.position || 'bottom';
+    const alignment = position === 'top' ? 8 : (position === 'middle' ? 5 : 2);
+    const marginV = Math.max(10, Number(subtitleOptions.marginV || 40));
+    const fontSize = Math.max(12, Number(subtitleOptions.fontSize || 20));
+    const fontName = String(subtitleOptions.fontFamily || 'Inter').replace(/'/g, '');
+    const stylePreset = String(subtitleOptions.stylePreset || 'Classic');
+    const preset = SRT_STYLE_PRESETS[stylePreset] || SRT_STYLE_PRESETS.Classic;
+    // Commas must be escaped for ffmpeg filter parser.
+    return `Alignment=${alignment}\\,MarginV=${marginV}\\,FontSize=${fontSize}\\,FontName=${fontName}\\,PrimaryColour=${preset.PrimaryColour}\\,OutlineColour=${preset.OutlineColour}\\,BackColour=${preset.BackColour}\\,Bold=${preset.Bold}\\,Outline=${preset.Outline}\\,Shadow=${preset.Shadow}\\,BorderStyle=${preset.BorderStyle}`;
+  }
+
+  _escapeSubtitlePathForFilter(subtitlePath) {
+    // Robust escaping for ffmpeg filter parser on Windows paths.
+    return String(subtitlePath || '')
+      .replace(/\\/g, '/')
+      .replace(/:/g, '\\:')
+      .replace(/'/g, "\\'")
+      .replace(/,/g, '\\,')
+      .replace(/\[/g, '\\[')
+      .replace(/\]/g, '\\]')
+      .replace(/;/g, '\\;')
+      .replace(/ /g, '\\ ');
+  }
+
   extractAudio(videoPath, onProgress) {
-    const out = path.join(os.tmpdir(), `rsg_audio_${Date.now()}.mp3`);
+    const out = path.join(os.tmpdir(), `ss_audio_${Date.now()}.wav`);
     onProgress?.({ step: 'Extracting Audio', percent: 5, message: 'Separating audio track…' });
 
     return new Promise((resolve, reject) => {
       ffmpeg(videoPath)
-        .noVideo().audioCodec('libmp3lame').audioBitrate(128).output(out)
+        .noVideo().audioCodec('pcm_s16le').audioChannels(2).audioFrequency(44100).format('wav').output(out)
         .on('progress', i => onProgress?.({ step: 'Extracting Audio', percent: 5 + Math.min(i.percent || 0, 100) * 0.15, message: `${Math.round(i.percent || 0)}%` }))
         .on('end', () => resolve(out))
         .on('error', (e, stdout, stderr) => reject(new Error(e.message + (stderr ? '\nstderr: ' + stderr : ''))))
@@ -59,10 +92,10 @@ class MediaProcessor {
   }
 
   downsampleAudioForAI(inputAudio, onProgress) {
-    const out = path.join(os.tmpdir(), `rsg_ai_${Date.now()}.mp3`);
+    const out = path.join(os.tmpdir(), `ss_ai_${Date.now()}.wav`);
     return new Promise((resolve, reject) => {
       ffmpeg(inputAudio)
-        .audioCodec('libmp3lame').audioBitrate(16).audioChannels(1).output(out)
+        .audioCodec('pcm_s16le').audioBitrate(16).audioChannels(1).audioFrequency(16000).format('wav').output(out)
         .on('progress', i => onProgress?.({ step: 'Analyzing Audio', percent: 22, message: `Optimizing for AI... ${Math.round(i.percent || 0)}%` }))
         .on('end', () => resolve(out))
         .on('error', (e, stdout, stderr) => reject(new Error(e.message + (stderr ? '\nstderr: ' + stderr : ''))))
@@ -86,22 +119,27 @@ class MediaProcessor {
     });
   }
 
-  async assembleVideo(segment, audioPath, bgContext, outputDir, onProgress) {
+  /**
+   * @param {string|null} subtitlePath  Optional path to subtitle file (.ass/.srt) to burn in.
+   */
+  async assembleVideo(segment, audioPath, bgContext, outputDir, onProgress, subtitlePath = null, subtitleOptions = {}) {
     if (this.cancelled) throw new Error('Cancelled');
 
+    console.log(`[ShotShorts] assembleVideo called, subtitlePath: ${subtitlePath || 'null'}`);
+
     const duration = segment.end - segment.start;
-    const safeTitle = segment.title.replace(/[<>:"/\\|?*]/g, '_').slice(0, 100);
-    const outFileName = segment.partIndex 
-      ? `Part ${segment.partIndex} | ${safeTitle}.mp4`
-      : `${safeTitle}.mp4`;
+    const safeTitle = this._sanitizeFileName(segment.title || `Story ${segment.index}`);
+    const outFileName = segment.partIndex
+      ? this._sanitizeFileName(`Part ${segment.partIndex} - ${safeTitle}.mp4`)
+      : this._sanitizeFileName(`${safeTitle}.mp4`);
     const outFile = path.join(outputDir, outFileName);
     const pId = segment.partIndex ? `${segment.index}_p${segment.partIndex}` : segment.index;
-    const segAudio = path.join(os.tmpdir(), `rsg_seg_${pId}_${Date.now()}.mp3`);
+    const segAudio = path.join(os.tmpdir(), `ss_seg_${pId}_${Date.now()}.wav`);
 
     // Cut segment audio
     await new Promise((res, rej) => {
       ffmpeg(audioPath).setStartTime(segment.start).setDuration(duration)
-        .audioCodec('libmp3lame').audioBitrate(128).format('mp3')
+        .audioCodec('pcm_s16le').audioChannels(2).audioFrequency(44100).format('wav')
         .output(segAudio)
         .on('end', res)
         .on('error', (e, stdout, stderr) => rej(new Error(e.message + (stderr ? '\nstderr: ' + stderr : ''))))
@@ -166,6 +204,9 @@ class MediaProcessor {
       });
     };
 
+    // Helper: check if subtitle is a rendered video overlay
+    const isSubtitleVideo = subtitlePath && /\.(webm|mov)$/i.test(subtitlePath);
+
     // Merge
     try {
       // If total background duration is less than needed, concat will freeze last frame.
@@ -178,6 +219,7 @@ class MediaProcessor {
         const cmd = ffmpeg();
         selected.forEach(bg => cmd.input(bg));
         cmd.input(segAudio);
+        if (isSubtitleVideo) cmd.input(subtitlePath);
 
         const filterStrings = [];
         const concatInputs = [];
@@ -185,8 +227,33 @@ class MediaProcessor {
           filterStrings.push(`[${index}:v]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,format=yuv420p[v${index}]`);
           concatInputs.push(`[v${index}]`);
         });
-        filterStrings.push(`${concatInputs.join('')}concat=n=${selected.length}:v=1:a=0[vout]`);
+        filterStrings.push(`${concatInputs.join('')}concat=n=${selected.length}:v=1:a=0[vconcat]`);
 
+        // Burn-in subtitles if provided
+        if (subtitlePath) {
+          console.log(`[ShotShorts] Applying subtitle: ${subtitlePath}, ext: ${path.extname(subtitlePath).toLowerCase()}`);
+          if (isSubtitleVideo) {
+            // Overlay pre-rendered subtitle video with alpha
+            const subInputIndex = selected.length + 1;
+            filterStrings.push(`[vconcat][${subInputIndex}:v]overlay=0:0:shortest=1:format=auto[vout]`);
+            console.log(`[ShotShorts] Using video overlay for subtitles`);
+          } else {
+            const escaped = this._escapeSubtitlePathForFilter(subtitlePath);
+            const ext = path.extname(subtitlePath).toLowerCase();
+            console.log(`[ShotShorts] Escaped subtitle path: ${escaped}`);
+            if (ext === '.ass') {
+              filterStrings.push(`[vconcat]ass='${escaped}'[vout]`);
+            } else {
+              const forceStyle = this._buildSrtForceStyle(subtitleOptions);
+              filterStrings.push(`[vconcat]subtitles='${escaped}':charenc=UTF-8:force_style='${forceStyle}'[vout]`);
+            }
+          }
+        } else {
+          // `copy` is not a valid filter; use no-op pass-through.
+          filterStrings.push(`[vconcat]null[vout]`);
+        }
+
+        const audioInputIndex = isSubtitleVideo ? selected.length + 2 : selected.length + 1;
         cmd.complexFilter(filterStrings)
           .outputOptions([
             '-t', String(duration),
@@ -206,16 +273,16 @@ class MediaProcessor {
       onProgress?.({ step: `Rendering Story ${segment.index}`, percent: 0, message: `Concat failed, trying safe fallback...` });
       
       // Fallback: Re-create segAudio with explicit format to avoid corruption
-      const safeSegAudio = path.join(os.tmpdir(), `rsg_seg_safe_${pId}_${Date.now()}.mp3`);
+      const safeSegAudio = path.join(os.tmpdir(), `ss_seg_safe_${pId}_${Date.now()}.wav`);
       try {
         await new Promise((res, rej) => {
           ffmpeg(audioPath)
             .setStartTime(segment.start)
             .setDuration(duration)
-            .audioCodec('libmp3lame')
-            .audioBitrate(128)
+            .audioCodec('pcm_s16le')
             .audioChannels(2)
-            .format('mp3')
+            .audioFrequency(44100)
+            .format('wav')
             .output(safeSegAudio)
             .on('end', res)
             .on('error', (e, stdout, stderr) => rej(new Error(e.message + (stderr ? '\nstderr: ' + stderr : ''))))
@@ -228,8 +295,8 @@ class MediaProcessor {
       try {
         // Verify the file exists and has content
         const stats = fs.statSync(safeSegAudio);
-        if (stats.size < 100) {
-          throw new Error(`Segment audio file too small (${stats.size} bytes), likely corrupted`);
+        if (stats.size < 2000) {
+          throw new Error(`Segment audio file too small (${stats.size} bytes), likely corrupted or boundaries out of range`);
         }
       } catch (statErr) {
         throw new Error(`Cannot access segment audio file: ${statErr.message}`);
@@ -238,19 +305,41 @@ class MediaProcessor {
       try {
         const singleBg = selected[0];
         await new Promise((res, rej) => {
-          ffmpeg()
+          const fallbackFilters = [
+            `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,format=yuv420p[vscaled]`
+          ];
+          if (subtitlePath) {
+            if (isSubtitleVideo) {
+              fallbackFilters.push(`[vscaled][1:v]overlay=0:0:shortest=1:format=auto[vout]`);
+            } else {
+              const escaped = this._escapeSubtitlePathForFilter(subtitlePath);
+              const ext = path.extname(subtitlePath).toLowerCase();
+              if (ext === '.ass') {
+                fallbackFilters.push(`[vscaled]ass='${escaped}'[vout]`);
+              } else {
+                const forceStyle = this._buildSrtForceStyle(subtitleOptions);
+                fallbackFilters.push(`[vscaled]subtitles='${escaped}':charenc=UTF-8:force_style='${forceStyle}'[vout]`);
+              }
+            }
+          } else {
+            // `copy` is not a valid filter; use no-op pass-through.
+            fallbackFilters.push(`[vscaled]null[vout]`);
+          }
+
+          const cmd = ffmpeg()
             .input(singleBg)
-            .inputOptions(['-stream_loop', '-1', '-re'])
-            .input(safeSegAudio)
-            .complexFilter([
-              `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,format=yuv420p[vout]`
-            ])
+            .inputOptions(['-stream_loop', '-1']);
+          if (isSubtitleVideo) cmd.input(subtitlePath);
+          cmd.input(safeSegAudio);
+
+          const audioMapIndex = isSubtitleVideo ? 2 : 1;
+          cmd.complexFilter(fallbackFilters)
             .outputOptions([
               '-t', String(duration),
               '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
               '-c:a', 'aac', '-b:a', '192k',
               '-map', '[vout]',
-              '-map', '1:a:0',
+              '-map', `${audioMapIndex}:a:0`,
               '-shortest',
               '-movflags', '+faststart'
             ])
@@ -268,6 +357,19 @@ class MediaProcessor {
     }
 
     return outFile;
+  }
+
+  _sanitizeFileName(name) {
+    const base = String(name || 'output')
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/[. ]+$/g, '');
+
+    const normalized = base || 'output';
+    const reserved = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+    const safe = reserved.test(normalized) ? `_${normalized}` : normalized;
+    return safe.slice(0, 180);
   }
 }
 

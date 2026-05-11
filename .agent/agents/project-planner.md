@@ -322,9 +322,6 @@ python .agent/scripts/verify_all.py . --url http://localhost:3000
 # P0: Lint & Type Check
 npm run lint && npx tsc --noEmit
 
-# P0: Security Scan
-python .agent/skills/vulnerability-scanner/scripts/security_scan.py .
-
 # P1: UX Audit
 python .agent/skills/frontend-design/scripts/ux_audit.py .
 

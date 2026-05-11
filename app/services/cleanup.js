@@ -7,7 +7,15 @@ function runCleanup() {
     const tmpDir = os.tmpdir();
     const files = fs.readdirSync(tmpDir);
 
-    const patterns = [/^rsg_audio_/, /^rsg_seg_/, /^rsg_bglist_/, /^rsg_ai_/];
+    const patterns = [
+      /^ss_audio_/,
+      /^ss_seg_/,
+      /^ss_seg_safe_/,
+      /^ss_bglist_/,
+      /^ss_ai_/,
+      /^ss_whisper_/,
+      /^ss_sub_/
+    ];
     
     let deletedCount = 0;
 
@@ -24,12 +32,12 @@ function runCleanup() {
     }
     
     if (deletedCount > 0) {
-      console.log(`[RSG Cleanup] Removed ${deletedCount} temporary file(s).`);
+      console.log(`[ShotShorts Cleanup] Removed ${deletedCount} temporary file(s).`);
     } else {
-      console.log(`[RSG Cleanup] No temporary files found to clean up.`);
+      console.log(`[ShotShorts Cleanup] No temporary files found to clean up.`);
     }
   } catch (err) {
-    console.error('[RSG Cleanup] Error during cleanup:', err);
+    console.error('[ShotShorts Cleanup] Error during cleanup:', err);
   }
 }
 
