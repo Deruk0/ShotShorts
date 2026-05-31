@@ -60,7 +60,7 @@
           </div>
         </div>
 
-        <p class="warning" id="no-keys-warning" style="display:none">Add at least one Gemini API key in Settings before generating.</p>
+        <p class="warning" id="no-keys-warning" style="display:none">Add at least one OpenRouter API key in Settings before generating.</p>
 
         <div id="progress-container" class="progress-container" style="display:none">
           <div class="progress-step" id="progress-step"></div>
@@ -69,7 +69,7 @@
             <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
           </div>
           <div class="progress-percent" id="progress-percent">0%</div>
-          <div class="progress-eta" id="progress-eta">Осталось: --:--</div>
+          <div class="progress-eta" id="progress-eta">--:--</div>
         </div>
 
         <button class="btn btn-primary generate-btn" id="btn-generate" disabled>⚡ Generate Videos ⚡</button>
@@ -94,13 +94,35 @@
       <div class="divider"></div>
 
       <div class="settings-section">
-        <div class="section-title" id="txt-gemini-title">Gemini API Keys</div>
+        <div class="section-title" id="txt-api-provider-title">API Provider</div>
+        <div class="field-group">
+          <select id="api-provider" class="strict-select">
+            <option value="openrouter">OpenRouter</option>
+            <option value="nvidia">NVIDIA NIM</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="settings-section" id="keys-section-openrouter">
+        <div class="section-title" id="txt-api-keys-title">OpenRouter API Keys</div>
         <div class="input-row">
-          <input type="password" id="key-input" placeholder="AIzaSy…  paste API key here" />
+          <input type="password" id="key-input" placeholder="sk-or-v1-… paste OpenRouter key here" />
           <button class="btn btn-primary" id="btn-add-key" disabled>Add</button>
         </div>
         <div class="key-list" id="key-list"></div>
-        <p class="hint" id="keys-hint">Add at least one API key to use the generator. Keys rotate automatically on rate-limit errors.</p>
+        <p class="hint" id="keys-hint">Add at least one OpenRouter API key to use the generator. Keys rotate automatically on rate-limit errors.</p>
+      </div>
+
+      <div class="settings-section" id="keys-section-nvidia" style="display:none">
+        <div class="section-title" id="txt-nvidia-keys-title">NVIDIA NIM API Keys</div>
+        <div class="input-row">
+          <input type="password" id="nvidia-key-input" placeholder="nvapi-… paste NVIDIA NIM key here" />
+          <button class="btn btn-primary" id="btn-add-nvidia-key" disabled>Add</button>
+        </div>
+        <div class="key-list" id="nvidia-key-list"></div>
+        <p class="hint" id="nvidia-keys-hint">Add at least one NVIDIA NIM API key to use the generator. Keys rotate automatically on rate-limit errors.</p>
       </div>
 
       <div class="divider"></div>
@@ -147,14 +169,24 @@
         </div>
         <div id="subtitle-fields" style="opacity:0.4;pointer-events:none">
 
-          <p class="hint" style="margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">1. Распознавание</p>
+          <p class="hint" style="margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">0. Groq API</p>
+          <div class="field-group">
+            <label class="field-label" id="txt-groq-key">Groq API Key</label>
+            <div class="input-row">
+              <input type="password" id="groq-key-input" placeholder="gsk_… paste Groq API key here" />
+              <button class="btn btn-primary" id="btn-add-groq-key" disabled>Add</button>
+            </div>
+            <div class="key-list" id="groq-key-list"></div>
+            <p class="hint" id="groq-key-hint">Required for subtitle transcription via Groq Whisper API.</p>
+          </div>
+
+          <p class="hint" style="margin-top:16px;margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">1. Распознавание</p>
           <div class="proxy-grid">
             <div class="field-group">
               <label class="field-label" id="txt-sub-model">Model Quality</label>
               <select id="subtitle-model" class="strict-select">
-                <option value="medium" selected>Medium — accurate, ~1.5 GB (recommended)</option>
-                <option value="small">Small — faster, ~500 MB</option>
-                <option value="large">Large — best quality, ~3 GB</option>
+                <option value="whisper-large-v3" selected>Whisper Large v3 — best quality</option>
+                <option value="whisper-large-v3-turbo">Whisper Large v3 Turbo — faster</option>
               </select>
             </div>
             <div class="field-group">
@@ -249,12 +281,14 @@
           <div class="subtitle-preview-card">
             <div class="subtitle-preview-head">Live Subtitle Preview</div>
             <div class="subtitle-preview-stage" id="subtitle-preview-stage">
-              <div class="subtitle-preview-overlay" id="subtitle-preview-overlay">
-                <span id="subtitle-preview-text">Это предпросмотр субтитров</span>
+              <div class="subtitle-preview-frame" id="subtitle-preview-frame">
+                <div class="subtitle-preview-overlay" id="subtitle-preview-overlay">
+                  <span id="subtitle-preview-text">Это предпросмотр субтитров</span>
+                </div>
               </div>
             </div>
           </div>
-          <p class="hint" id="txt-sub-hint" style="margin-top:8px">First run will install PyTorch + openai-whisper and download the model automatically. Requires Python 3.9+ in PATH.</p>
+          <p class="hint" id="txt-sub-hint" style="margin-top:8px">Transcription uses Groq Whisper API. Add your Groq API key above.</p>
         </div>
       </div>
 

@@ -27,3 +27,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Test audio files
+app/test_*.mp3
+app/test_*.m4a
+app/test_*.ogg
+app/test_*.wav

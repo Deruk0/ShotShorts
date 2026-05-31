@@ -4,7 +4,15 @@ async function getStore() {
   if (!storeInstance) {
     const { default: Store } = await import('electron-store');
     const schema = {
+      apiProvider: { type: 'string', default: 'openrouter' },
       apiKeys: {
+        type: 'array',
+        items: {
+          type: 'string'
+        },
+        default: []
+      },
+      nvidiaApiKeys: {
         type: 'array',
         items: {
           type: 'string'
@@ -24,7 +32,7 @@ async function getStore() {
       },
       subtitlesEnabled: { type: 'boolean', default: false },
       subtitleStyle: { type: 'string', default: 'Classic' },
-      subtitleModel: { type: 'string', default: 'small' },
+      subtitleModel: { type: 'string', default: 'whisper-large-v3' },
       subtitleLanguage: { type: 'string', default: 'ru' },
       subtitlePosition: { type: 'string', default: 'bottom' },
       subtitleWordsPerLine: { type: 'number', default: 3 },
@@ -40,6 +48,7 @@ async function getStore() {
         default: ['highlight']
       },
       subtitleCase: { type: 'string', default: 'sentence' },
+      groqApiKey: { type: 'string', default: '' },
       appLanguage: { type: 'string', default: 'en' },
       stats: {
         type: 'object',
@@ -59,7 +68,9 @@ async function getStore() {
 async function getSettings() {
   const store = await getStore();
   return {
+    apiProvider: store.get('apiProvider'),
     apiKeys: store.get('apiKeys'),
+    nvidiaApiKeys: store.get('nvidiaApiKeys'),
     proxy: store.get('proxy'),
     subtitlesEnabled: store.get('subtitlesEnabled'),
     subtitleStyle: store.get('subtitleStyle'),
@@ -75,14 +86,19 @@ async function getSettings() {
     subtitleKaraokeMode: store.get('subtitleKaraokeMode'),
     subtitleKaraokeEffects: store.get('subtitleKaraokeEffects'),
     subtitleCase: store.get('subtitleCase'),
+    groqApiKey: store.get('groqApiKey'),
     appLanguage: store.get('appLanguage')
   };
 }
 
 async function saveSettings(settings) {
   const store = await getStore();
+  if (settings.apiProvider !== undefined) store.set('apiProvider', settings.apiProvider);
   if (settings.apiKeys !== undefined) {
     store.set('apiKeys', settings.apiKeys);
+  }
+  if (settings.nvidiaApiKeys !== undefined) {
+    store.set('nvidiaApiKeys', settings.nvidiaApiKeys);
   }
   if (settings.proxy !== undefined) {
     store.set('proxy', settings.proxy);
@@ -106,7 +122,13 @@ async function saveSettings(settings) {
     store.set('subtitleKaraokeEffects', effects.length > 0 ? effects : ['highlight']);
   }
   if (settings.subtitleCase !== undefined) store.set('subtitleCase', settings.subtitleCase);
+  if (settings.groqApiKey !== undefined) store.set('groqApiKey', settings.groqApiKey);
   if (settings.appLanguage !== undefined) store.set('appLanguage', settings.appLanguage);
+}
+
+async function getApiProvider() {
+  const store = await getStore();
+  return store.get('apiProvider');
 }
 
 async function getApiKeys() {
@@ -114,9 +136,19 @@ async function getApiKeys() {
   return store.get('apiKeys');
 }
 
+async function getNvidiaApiKeys() {
+  const store = await getStore();
+  return store.get('nvidiaApiKeys');
+}
+
 async function getProxy() {
   const store = await getStore();
   return store.get('proxy');
+}
+
+async function getGroqApiKey() {
+  const store = await getStore();
+  return store.get('groqApiKey');
 }
 
 async function getStats() {
@@ -132,8 +164,11 @@ async function saveStats(stats) {
 module.exports = {
   getSettings,
   saveSettings,
+  getApiProvider,
   getApiKeys,
+  getNvidiaApiKeys,
   getProxy,
+  getGroqApiKey,
   getStats,
   saveStats
 };

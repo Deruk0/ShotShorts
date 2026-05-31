@@ -1,54 +1,17 @@
 /**
- * WhisperService — local transcription via official OpenAI Whisper (PyTorch).
+ * WhisperService — transcription via Groq API (whisper-large-v3 / whisper-large-v3-turbo).
  *
  * Strategy:
- *  • Uses the `openai-whisper` pip package with PyTorch + CUDA 12.x (RTX 4060).
- *  • Checks/installs everything into a user-local venv on first run.
- *  • Default model: medium — good accuracy for Russian, ~1.5 GB VRAM.
- *  • Model files are downloaded on-demand and cached in app-data.
- *  • Outputs per-segment timed text, converts to ASS subtitle format.
+ *  • Sends audio to Groq's Whisper endpoint — no local Python/PyTorch needed.
+ *  • Outputs per-segment timed text, converts to ASS/SRT subtitle format.
+ *  • Supports word-level timestamps for karaoke mode.
  */
 
-const { spawn } = require('child_process');
-const path = require('path');
 const fs = require('fs');
-const os = require('os');
-const { app } = require('electron');
-
-// ---------------------------------------------------------------------------
-// Paths
-// ---------------------------------------------------------------------------
-const DATA_DIR = app
-  ? path.join(app.getPath('userData'), 'whisper')
-  : path.join(os.homedir(), '.shortsgen', 'whisper');
-
-const VENV_DIR = path.join(DATA_DIR, 'venv');
-const MODEL_DIR = path.join(DATA_DIR, 'models');
-
-// Python executable inside venv
-const PYTHON_EXE = process.platform === 'win32'
-  ? path.join(VENV_DIR, 'Scripts', 'python.exe')
-  : path.join(VENV_DIR, 'bin', 'python');
-
-// Inline Python script used for transcription
-const PY_SCRIPT = path.join(DATA_DIR, 'transcribe.py');
-
-const PYTHON_BOOTSTRAP = process.platform === 'win32'
-  ? [
-      ['py', ['-3', '-m', 'venv', VENV_DIR]],
-      ['python', ['-m', 'venv', VENV_DIR]],
-      ['python3', ['-m', 'venv', VENV_DIR]]
-    ]
-  : [
-      ['python3', ['-m', 'venv', VENV_DIR]],
-      ['python', ['-m', 'venv', VENV_DIR]]
-    ];
-
-const TORCH_INDEX_URLS = [
-  'https://download.pytorch.org/whl/cu128',
-  'https://download.pytorch.org/whl/cu126',
-  'https://download.pytorch.org/whl/cu121'
-];
+const path = require('path');
+const axios = require('axios');
+const { HttpsProxyAgent } = require('https-proxy-agent');
+const { SocksProxyAgent } = require('socks-proxy-agent');
 
 // ---------------------------------------------------------------------------
 // ASS style presets
@@ -61,36 +24,39 @@ const ASS_STYLES = {
     outlineColour: '&H00000000',
     backColour: '&H80000000',
     bold: 1,
-    outline: 2,
-    shadow: 1,
+    outline: 3,
+    shadow: 2,
     alignment: 2,
     marginV: 40,
+    marginH: 40,
     BorderStyle: 1
   },
   Minimal: {
     fontName: 'Arial',
     fontSize: 18,
-    primaryColour: '&H00FFFFFF',
+    primaryColour: '&H00E5E7EB',
     outlineColour: '&H00000000',
     backColour: '&H00000000',
     bold: 0,
     outline: 1.5,
-    shadow: 0,
+    shadow: 1.5,
     alignment: 2,
     marginV: 30,
+    marginH: 40,
     BorderStyle: 1
   },
   Highlight: {
     fontName: 'Arial Black',
     fontSize: 22,
-    primaryColour: '&H0000FFFF',   // yellow
+    primaryColour: '&H0066E0FF',
     outlineColour: '&H00000000',
     backColour: '&H80000000',
     bold: 1,
-    outline: 2.5,
-    shadow: 2,
+    outline: 3.5,
+    shadow: 3,
     alignment: 2,
     marginV: 40,
+    marginH: 40,
     BorderStyle: 1
   },
   TikTokBold: {
@@ -100,10 +66,11 @@ const ASS_STYLES = {
     outlineColour: '&H00000000',
     backColour: '&H00000000',
     bold: 1,
-    outline: 3.2,
-    shadow: 2.4,
+    outline: 5,
+    shadow: 5,
     alignment: 2,
     marginV: 44,
+    marginH: 40,
     BorderStyle: 1
   },
   HeavyShadow: {
@@ -113,34 +80,37 @@ const ASS_STYLES = {
     outlineColour: '&H00000000',
     backColour: '&H00000000',
     bold: 1,
-    outline: 3.2,
-    shadow: 4.8,
+    outline: 5,
+    shadow: 8,
     alignment: 2,
     marginV: 44,
+    marginH: 40,
     BorderStyle: 1
   },
   SoftBox: {
     fontName: 'Arial',
     fontSize: 20,
     primaryColour: '&H00F2F2F2',
-    outlineColour: '&H24FFFFFF',
+    outlineColour: '&H30FFFFFF',
     backColour: '&H7A000000',
     bold: 1,
-    outline: 1.4,
-    shadow: 0.8,
+    outline: 2,
+    shadow: 1.5,
     alignment: 2,
     marginV: 40,
+    marginH: 40,
     BorderStyle: 3
   }
+};
+
+const GROQ_MODELS = {
+  'whisper-large-v3': 'Whisper Large v3 — best quality',
+  'whisper-large-v3-turbo': 'Whisper Large v3 Turbo — faster, slightly less accurate'
 };
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-function ensureDir(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
-
 function seconds2ass(t) {
   const h = Math.floor(t / 3600);
   const m = Math.floor((t % 3600) / 60);
@@ -191,12 +161,10 @@ function applyCaseToText(text, caseName = 'sentence') {
   if (caseName === 'uppercase') return value.toUpperCase();
   if (caseName === 'lowercase') return value.toLowerCase();
   if (!value) return value;
-  // True sentence case: only capitalize the first character, preserve the rest
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 function buildAssKaraokeLine(words, activeIndex, karaokeEffects, styleName, caseName, baseColour) {
-  // ASS color format is BGR with trailing '&': &HAABBGGRR&
   const highlightColour = '&H0000D4FF&';
   const safeBaseColour = String(baseColour || '&H00FFFFFF&');
 
@@ -211,7 +179,6 @@ function buildAssKaraokeLine(words, activeIndex, karaokeEffects, styleName, case
       if (karaokeEffects.has('highlight')) {
         tags.push(`\\1c${highlightColour}`);
       } else {
-        // In "box only" mode, force original text color explicitly.
         tags.push(`\\1c${safeBaseColour}`);
       }
       if (!tags.length) tags.push(`\\c${highlightColour}`);
@@ -222,323 +189,195 @@ function buildAssKaraokeLine(words, activeIndex, karaokeEffects, styleName, case
 }
 
 // ---------------------------------------------------------------------------
-// Inline Python transcription script
+// Build proxy agent (same pattern as base-audio-client.js)
 // ---------------------------------------------------------------------------
-const TRANSCRIBE_PY = `
-import sys, json, os, warnings
-warnings.filterwarnings("ignore")
-os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
+function buildProxyAgent(proxy) {
+  if (!proxy || !proxy.host) return null;
+  const { type = 'http', host, port, username, password } = proxy;
+  const cleanHost = host.replace(/^(https?|socks\d?):\/\//i, '');
+  const encUser = username ? encodeURIComponent(String(username)) : '';
+  const encPass = password ? encodeURIComponent(String(password)) : '';
 
-ffmpeg_bin = os.environ.get("WHISPER_FFMPEG", "")
-if ffmpeg_bin and os.path.exists(ffmpeg_bin):
-    ffmpeg_dir = os.path.dirname(ffmpeg_bin)
-    os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+  if (type === 'socks5') {
+    const url = username
+      ? `socks5://${encUser}:${encPass}@${cleanHost}:${port}`
+      : `socks5://${cleanHost}:${port}`;
+    return new SocksProxyAgent(url);
+  }
+  const proto = type === 'https' ? 'https' : 'http';
+  const url = username
+    ? `${proto}://${encUser}:${encPass}@${cleanHost}:${port}`
+    : `${proto}://${cleanHost}:${port}`;
+  return new HttpsProxyAgent(url);
+}
 
-audio_path = sys.argv[1]
-model_size = sys.argv[2]   # tiny | base | small | medium | large
-language   = sys.argv[3]   # ru | en | ...
-model_dir  = sys.argv[4]
+// ---------------------------------------------------------------------------
+// Groq API request helper
+// ---------------------------------------------------------------------------
+function groqRequest(apiKey, audioPath, model, language, proxy) {
+  const FormData = require('form-data');
+  const form = new FormData();
+  const ext = path.extname(audioPath).toLowerCase();
+  const contentType = ext === '.mp3' ? 'audio/mpeg' : 'audio/wav';
 
-import whisper
-import torch
+  form.append('file', fs.createReadStream(audioPath), {
+    filename: path.basename(audioPath),
+    contentType
+  });
+  form.append('model', model);
+  form.append('language', language);
+  form.append('response_format', 'verbose_json');
+  form.append('timestamp_granularities[]', 'segment');
+  form.append('timestamp_granularities[]', 'word');
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model = whisper.load_model(model_size, download_root=model_dir, device=device)
+  const config = {
+    headers: {
+      ...form.getHeaders(),
+      'Authorization': `Bearer ${apiKey}`
+    },
+    timeout: 300000,
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity
+  };
 
-result = model.transcribe(
-    audio_path,
-    language=language,
-    word_timestamps=True,
-    verbose=False,
-    fp16=torch.cuda.is_available()
-)
+  const agent = buildProxyAgent(proxy);
+  if (agent) {
+    config.httpsAgent = agent;
+    console.log(`[Groq] Using proxy: ${proxy.type}://${proxy.host}:${proxy.port}`);
+  } else {
+    console.log(`[Groq] No proxy configured, going direct. Proxy data:`, JSON.stringify(proxy));
+  }
 
-out = []
-for seg in result["segments"]:
-    words = []
-    if "words" in seg:
-        for w in seg["words"]:
-            words.append({"word": w["word"], "start": w["start"], "end": w["end"]})
-    out.append({
-        "start": seg["start"],
-        "end":   seg["end"],
-        "text":  seg["text"].strip(),
-        "words": words
-    })
-
-print(json.dumps(out, ensure_ascii=False))
-`.trim();
+  return axios.post(
+    'https://api.groq.com/openai/v1/audio/transcriptions',
+    form,
+    config
+  ).then(res => res.data);
+}
 
 // ---------------------------------------------------------------------------
 // WhisperService
 // ---------------------------------------------------------------------------
 class WhisperService {
   constructor() {
-    this._ready = false;
-    this.ffmpegPath = this._detectFfmpegPath();
-    // Migrate legacy Whisper data dir (if present) to Electron app's data dir
-    const legacyDir = path.join(os.homedir(), '.shortsgen', 'whisper');
-    try {
-      if (!fs.existsSync(DATA_DIR) && fs.existsSync(legacyDir)) {
-        // Move legacy dir to new location
-        fs.renameSync(legacyDir, DATA_DIR);
-      }
-    } catch (e) {
-      // Non-fatal migration issues; will be logged later if needed
-    }
-    ensureDir(DATA_DIR);
-    ensureDir(MODEL_DIR);
-    this._writePyScript();
-  }
-
-  _writePyScript() {
-    fs.writeFileSync(PY_SCRIPT, TRANSCRIBE_PY, 'utf8');
-  }
-
-  // Check whether the venv + openai-whisper are installed
-  async isInstalled() {
-    if (!fs.existsSync(PYTHON_EXE)) return false;
-    try {
-      await this._run(PYTHON_EXE, ['-c', 'import whisper, torch; print("ok")']);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  // Promisified child process runner for install steps
-  _run(cmd, args, onProgress) {
-    return new Promise((resolve, reject) => {
-      const proc = spawn(cmd, args, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true
-      });
-      proc.stdout.on('data', d => onProgress?.(d.toString().trim()));
-      proc.stderr.on('data', d => onProgress?.(d.toString().trim()));
-      proc.on('close', code => code === 0 ? resolve() : reject(new Error(`${cmd} exited with code ${code}`)));
-      proc.on('error', err => reject(new Error(`Cannot start ${cmd}: ${err.message}`)));
-    });
-  }
-
-  _detectFfmpegPath() {
-    const candidates = [
-      path.join(__dirname, '..', 'resources', 'ffmpeg.exe'),
-      path.join(path.dirname(process.execPath), 'resources', 'resources', 'ffmpeg.exe'),
-      path.join(process.env.PROGRAMFILES  || 'C:\\Program Files',  'ffmpeg', 'bin', 'ffmpeg.exe'),
-      path.join(process.env['ProgramFiles(x86)'] || '', 'ffmpeg',  'bin', 'ffmpeg.exe'),
-      path.join(process.env.LOCALAPPDATA  || '', 'ffmpeg',          'bin', 'ffmpeg.exe'),
-      path.join(os.homedir(), 'ffmpeg', 'bin', 'ffmpeg.exe'),
-      path.join(os.homedir(), 'scoop', 'shims', 'ffmpeg.exe'),
-      'C:\\ProgramData\\chocolatey\\bin\\ffmpeg.exe'
-    ];
-
-    for (const c of candidates) {
-      try {
-        if (c && fs.existsSync(c)) return c;
-      } catch {}
-    }
-    return null;
-  }
-
-  async _createVenv(onProgress) {
-    let lastError = null;
-
-    for (const [cmd, args] of PYTHON_BOOTSTRAP) {
-      try {
-        onProgress?.(`Trying Python launcher: ${cmd}`);
-        await this._run(cmd, args, onProgress);
-        return;
-      } catch (err) {
-        lastError = err;
-      }
-    }
-
-    throw new Error(
-      'Python 3.9+ was not found. Install Python and ensure `py`, `python`, or `python3` is available in PATH.' +
-      (lastError ? ` Last error: ${lastError.message}` : '')
-    );
-  }
-
-  async _installTorch(onProgress) {
-    let lastError = null;
-
-    for (const indexUrl of TORCH_INDEX_URLS) {
-      try {
-        onProgress?.(`Installing PyTorch from ${indexUrl}…`);
-        await this._run(PYTHON_EXE, [
-          '-m', 'pip', 'install', '--upgrade',
-          'torch',
-          '--index-url', indexUrl
-        ], onProgress);
-        return;
-      } catch (err) {
-        lastError = err;
-      }
-    }
-
-    onProgress?.('CUDA PyTorch install failed, trying CPU fallback…');
-    try {
-      await this._run(PYTHON_EXE, [
-        '-m', 'pip', 'install', '--upgrade', 'torch'
-      ], onProgress);
-      return;
-    } catch (cpuErr) {
-      throw new Error(
-        'Failed to install PyTorch (CUDA and CPU fallback).' +
-        (lastError ? ` CUDA error: ${lastError.message}.` : '') +
-        ` CPU error: ${cpuErr.message}`
-      );
-    }
+    this.apiKey = null;
+    this.proxy = null;
   }
 
   /**
-   * Install openai-whisper + PyTorch (CUDA 12.1) into a local venv.
-   * @param {function} onProgress  (message: string) => void
+   * Set the Groq API key.
+   * @param {string} key  Groq API key (gsk_...)
    */
-  async install(onProgress) {
-    ensureDir(VENV_DIR);
-    if (!fs.existsSync(PYTHON_EXE)) {
-      onProgress?.('Creating Python virtual environment…');
-      await this._createVenv(onProgress);
-    } else {
-      onProgress?.('Using existing Whisper virtual environment…');
-    }
-
-    onProgress?.('Upgrading pip/setuptools…');
-    await this._run(PYTHON_EXE, [
-      '-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel'
-    ], onProgress);
-
-    onProgress?.('Installing PyTorch with CUDA support (this may take several minutes)…');
-    await this._installTorch(onProgress);
-
-    onProgress?.('Installing openai-whisper…');
-    await this._run(PYTHON_EXE, [
-      '-m', 'pip', 'install', '--upgrade',
-      'openai-whisper'
-    ], onProgress);
-
-    // Validate runtime imports after install
-    await this._run(PYTHON_EXE, ['-c', 'import whisper, torch; print(torch.__version__)'], onProgress);
-
-    onProgress?.('openai-whisper installed successfully ✓');
-    this._writePyScript();
+  setApiKey(key) {
+    this.apiKey = key;
   }
 
   /**
-   * Transcribe an audio file.
+   * Set proxy config.
+   * @param {object|null} proxy  { type, host, port, username, password }
+   */
+  setProxy(proxy) {
+    this.proxy = proxy;
+  }
+
+  /**
+   * Transcribe an audio file via Groq API.
    * @param {string}   audioPath   Path to WAV / MP3
-   * @param {object}   opts        { model: 'medium'|'small'|'large', language: 'ru' }
+   * @param {object}   opts        { model, language, apiKey, proxy }
    * @param {function} onProgress
    * @returns {Promise<Array>}     Array of { start, end, text, words[] }
    */
   async transcribe(audioPath, opts = {}, onProgress) {
-    const model    = opts.model    || 'medium';
+    const model    = opts.model || 'whisper-large-v3';
     const language = opts.language || 'ru';
+    const apiKey   = opts.apiKey || this.apiKey;
+    const proxy    = opts.proxy || this.proxy;
 
-    if (!(await this.isInstalled())) {
-      onProgress?.('Installing Whisper engine…');
-      await this.install(onProgress);
+    if (!apiKey) {
+      throw new Error('Groq API key not set. Add it in Settings.');
     }
 
-    if (!this.ffmpegPath) {
-      onProgress?.('FFmpeg not found in known locations, Whisper will use system PATH…');
+    onProgress?.(`Transcribing audio [${model}] via Groq…`);
+
+    const result = await groqRequest(apiKey, audioPath, model, language, proxy);
+
+    // Groq verbose_json response has segments with word-level timestamps
+    const segments = [];
+    if (result.segments && Array.isArray(result.segments)) {
+      for (const seg of result.segments) {
+        const words = [];
+        if (result.words && Array.isArray(result.words)) {
+          for (const w of result.words) {
+            if (w.start >= seg.start && w.start < seg.end) {
+              words.push({
+                word: w.word,
+                start: w.start,
+                end: w.end
+              });
+            }
+          }
+        }
+        segments.push({
+          start: seg.start,
+          end: seg.end,
+          text: seg.text.trim(),
+          words
+        });
+      }
+    } else if (result.words && Array.isArray(result.words) && result.words.length > 0) {
+      // No segments but we have words — reconstruct segments from words
+      const allWords = result.words.map(w => ({ word: w.word, start: w.start, end: w.end }));
+      // Group words into segments by sentence-ending punctuation or ~10s gaps
+      let segStart = allWords[0].start;
+      let segWords = [];
+      let prevEnd = allWords[0].start;
+      for (const w of allWords) {
+        // Start a new segment on large gap or after sentence-ending punctuation
+        if (segWords.length > 0 && (w.start - prevEnd > 1.5 || /[.!?]$/.test(segWords[segWords.length - 1].word))) {
+          const text = segWords.map(sw => sw.word).join(' ');
+          segments.push({ start: segStart, end: segWords[segWords.length - 1].end, text: text.trim(), words: [...segWords] });
+          segStart = w.start;
+          segWords = [];
+        }
+        segWords.push(w);
+        prevEnd = w.end;
+      }
+      if (segWords.length > 0) {
+        const text = segWords.map(sw => sw.word).join(' ');
+        segments.push({ start: segStart, end: segWords[segWords.length - 1].end, text: text.trim(), words: [...segWords] });
+      }
+    } else if (result.text) {
+      segments.push({
+        start: 0,
+        end: 0,
+        text: result.text.trim(),
+        words: []
+      });
     }
 
-    onProgress?.(`Transcribing audio [${model}]…`);
-
-    return new Promise((resolve, reject) => {
-      let stdout = '';
-      let stderr = '';
-
-      const proc = spawn(PYTHON_EXE, [
-        PY_SCRIPT,
-        audioPath,
-        model,
-        language,
-        MODEL_DIR
-      ], {
-        env: {
-          ...process.env,
-          PYTHONUTF8: '1',
-          PYTHONIOENCODING: 'utf-8',
-          KMP_DUPLICATE_LIB_OK: 'TRUE',
-          WHISPER_FFMPEG: this.ffmpegPath || '',
-          PATH: this.ffmpegPath
-            ? `${path.dirname(this.ffmpegPath)}${path.delimiter}${process.env.PATH || ''}`
-            : (process.env.PATH || '')
-        },
-        windowsHide: true
-      });
-
-      proc.stdout.on('data', d => { stdout += d.toString(); });
-      proc.stderr.on('data', d => {
-        const line = d.toString();
-        stderr += line;
-        // Forward useful progress lines
-        if (line.includes('%') || line.toLowerCase().includes('loading')) {
-          onProgress?.(line.trim());
-        }
-      });
-
-      proc.on('close', code => {
-        if (code !== 0) {
-          if (/ffmpeg/i.test(stderr) && /(not found|No such file|cannot find)/i.test(stderr)) {
-            return reject(new Error(
-              'Whisper cannot find ffmpeg. Install FFmpeg and add it to PATH, or place ffmpeg.exe in app/resources/.'
-            ));
-          }
-          return reject(new Error(`Whisper exited with code ${code}\n${stderr.slice(-1500)}`));
-        }
-        try {
-          const trimmed = stdout.trim();
-          let data = null;
-          try {
-            data = JSON.parse(trimmed);
-          } catch {
-            const m = trimmed.match(/(\[[\s\S]*\])\s*$/);
-            if (m) data = JSON.parse(m[1]);
-          }
-          if (!Array.isArray(data)) {
-            throw new Error('Whisper output is not a JSON array');
-          }
-          resolve(data);
-        } catch (e) {
-          reject(new Error(`Failed to parse Whisper output: ${e.message}\nRaw: ${stdout.slice(0, 300)}`));
-        }
-      });
-
-      proc.on('error', err => reject(new Error(`Failed to start Whisper: ${err.message}`)));
-    });
+    onProgress?.(`Transcription complete: ${segments.length} segments`);
+    return segments;
   }
 
   /**
    * Convert transcription segments to an ASS subtitle string.
-   * @param {Array}  segments   Result of transcribe()
-   * @param {string} styleName  'Classic' | 'Minimal' | 'Highlight'
-   * @param {number} offsetSec  Time offset to subtract (segment start)
-   * @returns {string}          ASS file content
    */
   toASS(segments, styleName = 'Classic', offsetSec = 0, subtitleOptions = {}, caseName = 'sentence') {
     if (typeof subtitleOptions === 'string') {
       caseName = subtitleOptions;
       subtitleOptions = {};
     }
-    // Allow stylePreset inside subtitleOptions to override the positional styleName argument
     const resolvedStyleName = subtitleOptions.stylePreset || styleName;
     const style = ASS_STYLES[resolvedStyleName] || ASS_STYLES.Classic;
     const wordsPerLine = Math.max(1, Number(subtitleOptions.wordsPerLine || 3));
     const maxLineMs = Math.max(300, Number(subtitleOptions.maxLineMs || 1200));
     const position = subtitleOptions.position || 'bottom';
     const alignment = position === 'top' ? 8 : (position === 'middle' ? 5 : 2);
-    // User-specified fontSize always wins; fall back to preset default
     const fontSize = Math.max(12, Number(subtitleOptions.fontSize || style.fontSize || 20));
     const marginV = Math.max(10, Number(subtitleOptions.marginV || style.marginV || 40));
     const karaoke = !!subtitleOptions.karaoke;
-    // User-specified fontFamily always wins over the preset font
     const fontName = String(subtitleOptions.fontFamily || style.fontName || 'Arial').replace(/,/g, ' ').trim() || 'Arial';
     const karaokeMode = String(subtitleOptions.karaokeMode || 'highlight');
-    // caseName from subtitleOptions takes precedence over positional argument
     const resolvedCase = subtitleOptions.caseName || caseName;
     const effectsFromOptions = Array.isArray(subtitleOptions.karaokeEffects)
       ? subtitleOptions.karaokeEffects
@@ -559,26 +398,20 @@ class WhisperService {
     const secondaryColour = resolvedStyleName === 'Highlight' ? '&H00FFFFFF' : '&H0000D4FF';
     const basePrimaryColour = String(style.primaryColour || '&H00FFFFFF');
     const basePrimaryColourAss = basePrimaryColour.endsWith('&') ? basePrimaryColour : `${basePrimaryColour}&`;
-    // Use BorderStyle from the preset (SoftBox=3 for opaque box, others=1 for outline)
     const borderStyle = style.BorderStyle || 1;
+    const marginH = Math.max(20, Number(style.marginH || 40));
 
     const header = [
       '[Script Info]',
       'ScriptType: v4.00+',
       'PlayResX: 1080',
       'PlayResY: 1920',
+      'WrapStyle: 0',
       '',
       '[V4+ Styles]',
       'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-      // Keep SecondaryColour close to PrimaryColour to avoid aggressive red karaoke tint.
-      `Style: Default,${fontName},${fontSize},${style.primaryColour},${secondaryColour},${style.outlineColour},${style.backColour},${style.bold},0,0,0,100,100,0,0,${borderStyle},${style.outline},${style.shadow},${alignment},10,10,${marginV},204`,
-      // Word-level karaoke "red box" style (opaque box background).
-      // Padding simulation via Outline thickness (ASS BorderStyle:3 box sizing).
-      // Match preview as closely as possible:
-      // CSS fill  rgba(255,59,48,0.46) -> ASS BackColour    &HA6303BFF  (alpha ~65%, slightly stronger for dark video bg)
-      // CSS border rgba(255,99,90,0.7) -> ASS OutlineColour &HB35A63FF  (alpha 70%)
-      // CSS padding ~6px horizontal    -> ASS Outline      3  (box extends 3px around glyph bounds)
-      `Style: KaraokeBox,${fontName},${fontSize},&H00FFFFFF,${secondaryColour},&HB35A63FF,&HA6303BFF,${style.bold},0,0,0,100,100,0,0,3,3,0,${alignment},10,10,${marginV},204`,
+      `Style: Default,${fontName},${fontSize},${style.primaryColour},${secondaryColour},${style.outlineColour},${style.backColour},${style.bold},0,0,0,100,100,0,0,${borderStyle},${style.outline},${style.shadow},${alignment},${marginH},${marginH},${marginV},204`,
+      `Style: KaraokeBox,${fontName},${fontSize},&H00FFFFFF,${secondaryColour},&H4D5A63FF,&H8A303BFF,${style.bold},0,0,0,100,100,0,0,3,1,0,${alignment},${marginH},${marginH},${marginV},204`,
       '',
       '[Events]',
       'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text'
@@ -592,8 +425,6 @@ class WhisperService {
         Number.isFinite(Number(w?.end)) &&
         Number(w.end) > Number(w.start)
       );
-      // If Whisper word timestamps are missing/weak, build a deterministic fallback
-      // from segment text so karaoke mode still visibly works.
       if (karaoke && timedWords.length === 0) {
         timedWords = buildFallbackTimedWords(seg);
       }
@@ -607,11 +438,9 @@ class WhisperService {
           const cEndAbsRaw = Number(chunk[chunk.length - 1].end || seg.end);
           const cEndAbsCapped = Math.min(cEndAbsRaw, cStartAbs + maxLineMs / 1000);
 
-          // Convert absolute Whisper timestamps into local segment time once.
           const cStart = Math.max(0, cStartAbs - offsetSec);
           const cEnd = Math.max(cStart + 0.12, cEndAbsCapped - offsetSec);
           const chunkWords = chunk.map(w => String(w.word || '').trim()).filter(Boolean);
-          const chunkTextRaw = String(seg.text || '').trim();
           let text = chunkWords.join(' ').trim();
           if (karaoke) {
             for (let wi = 0; wi < chunk.length; wi++) {
@@ -635,8 +464,6 @@ class WhisperService {
             idx += wordsPerLine;
             continue;
           }
-          // For non-karaoke output prefer Whisper's original segment text to preserve punctuation.
-          if (chunkTextRaw) text = chunkTextRaw;
           text = escapeAssText(applyCaseToText(text, resolvedCase));
           if (text) {
             events.push(`Dialogue: 0,${seconds2ass(cStart)},${seconds2ass(cEnd)},Default,,0,0,0,,${text}`);
@@ -644,7 +471,6 @@ class WhisperService {
           idx += wordsPerLine;
         }
       } else {
-        // No word timestamps — still split by wordsPerLine and maxLineMs
         const segWords = String(seg.text || '').trim().split(/\s+/).filter(Boolean);
         const segStart = Math.max(0, seg.start - offsetSec);
         const segEnd = Math.max(segStart + 0.2, seg.end - offsetSec);
@@ -670,7 +496,6 @@ class WhisperService {
 
   /**
    * Convert transcription segments to SRT subtitle string.
-   * This is a safer fallback format for ffmpeg subtitle burn-in on Windows.
    */
   toSRT(segments, offsetSec = 0, subtitleOptions = {}) {
     const caseName = subtitleOptions.caseName || subtitleOptions.karaokeCase || 'sentence';
@@ -722,7 +547,6 @@ class WhisperService {
               if (i !== hi) return w;
               let value = w;
               if (karaokeEffects.has('highlight')) {
-                // In yellow-forward style, highlighted karaoke word should be white.
                 value = stylePreset === 'Highlight'
                   ? `<font color="#FFFFFF">${value}</font>`
                   : `<font color="#FFD400">${value}</font>`;
@@ -743,7 +567,6 @@ class WhisperService {
           idx += wordsPerLine;
         }
       } else {
-        // No word timestamps — still split by wordsPerLine and maxLineMs
         const segWords = String(seg.text || '').replace(/\r?\n/g, ' ').trim().split(/\s+/).filter(Boolean);
         const segStart = Math.max(0, Number(seg.start || 0) - offsetSec);
         const segEnd = Math.max(segStart + 0.2, Number(seg.end || 0) - offsetSec);
@@ -788,4 +611,4 @@ class WhisperService {
   }
 }
 
-module.exports = { WhisperService, ASS_STYLES };
+module.exports = { WhisperService, ASS_STYLES, GROQ_MODELS };

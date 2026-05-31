@@ -1,9 +1,10 @@
 const { ipcMain, BrowserWindow } = require('electron');
-const { GeminiClient } = require('./gemini-client');
+const { OpenRouterClient } = require('./openrouter-client');
+const { NvidiaClient } = require('./nvidia-client');
 const { MediaProcessor } = require('./media-processor');
 const { WhisperService } = require('./whisper-service');
-const { SubtitleRenderer } = require('./subtitle-renderer');
-const { getApiKeys, getProxy } = require('./store');
+const { FontManager } = require('./font-manager');
+const { getApiProvider, getApiKeys, getNvidiaApiKeys, getProxy, getGroqApiKey } = require('./store');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -47,18 +48,30 @@ function register() {
       send({ step: 'Analyzing Audio', percent: 22, message: 'Optimizing audio for AI (makes sending faster)…' });
       const aiAudioPath = await mp.downsampleAudioForAI(audioPath, send);
       if (aiAudioPath) tempFiles.push(aiAudioPath);
-      
-      send({ step: 'Analyzing Audio', percent: 25, message: 'Sending to Gemini AI…' });
-      const apiKeys = (await getApiKeys()) || [];
-      const proxy = await getProxy();
-      if (!apiKeys || apiKeys.length === 0) return { success: false, error: 'No Gemini API keys configured' };
 
-      const gemini = new GeminiClient(apiKeys, proxy);
-      const segments = await gemini.analyzeAudio(aiAudioPath, (msg) => {
+      const apiProvider = await getApiProvider();
+      const proxy = await getProxy();
+
+      let apiKeys;
+      let client;
+      let providerName;
+      if (apiProvider === 'nvidia') {
+        apiKeys = (await getNvidiaApiKeys()) || [];
+        providerName = 'NVIDIA NIM';
+        client = new NvidiaClient(apiKeys, proxy);
+      } else {
+        apiKeys = (await getApiKeys()) || [];
+        providerName = 'OpenRouter';
+        client = new OpenRouterClient(apiKeys, proxy);
+      }
+
+      send({ step: 'Analyzing Audio', percent: 25, message: `Sending to NVIDIA Nemotron AI via ${providerName}…` });
+      if (!apiKeys || apiKeys.length === 0) return { success: false, error: `No ${providerName} API keys configured` };
+      const segments = await client.analyzeAudio(aiAudioPath, (msg) => {
         send({ step: 'AI Analysis', percent: 25, message: msg });
       });
       // (aiAudioPath will be cleaned up in finally block)
-      
+
       if (!segments?.length) return { success: false, error: 'No stories detected by AI' };
 
       // Add 5-second buffer and clamp to real audio duration to avoid silent/out-of-range chunks.
@@ -88,53 +101,57 @@ function register() {
       // 4. Assemble each story
       const outputFiles = [];
       const base = 35;
-      // Combine short stories (< 180s) with adjacent ones (use first story's title only)
+      // Combine short stories (< 120s / 2 min) with adjacent ones (use first story's title only)
+      const MAX_GAP_SEC = 30; // Don't merge segments that are more than 30s apart
       const mergedSegments = [];
       for (let i = 0; i < normalizedSegments.length; i++) {
         let seg = { ...normalizedSegments[i] };
-        
-        // Group stories if the current one is shorter than 3 minutes
-        while ((seg.end - seg.start) < 180 && i + 1 < normalizedSegments.length) {
-          let nextSeg = normalizedSegments[i + 1];
+
+        // Group stories if the current one is shorter than 2 minutes and the next one is close enough
+        while (i + 1 < normalizedSegments.length) {
+          const duration = seg.end - seg.start;
+          if (duration >= 120) break;
+          const nextSeg = normalizedSegments[i + 1];
+          const gap = Math.abs(nextSeg.start - seg.end);
+          if (gap > MAX_GAP_SEC) break; // Too far apart — don't merge
           seg.end = nextSeg.end;
           // Keep the FIRST story's title, do not concatenate
           i++; // Skip the next segment since it's merged
         }
-        
+
         mergedSegments.push(seg);
       }
 
-      // Split long stories (> 7 min and <= 15 min) into parts
+      // Split long stories (> 5 min / 300s) into parts
       const chunks = [];
-      
+
       for (let seg of mergedSegments) {
         let duration = seg.end - seg.start;
-        
-        if (duration > 420 && duration <= 900) { 
-          // Story longer than 7 min (420s) and not more than 15 min (900s). Split it!
-          // Target part duration ~4 minutes (240s)
-          let numParts = Math.ceil(duration / 240);
-          if (numParts > 3) numParts = 3; // Max 3 parts
-          
+
+        if (duration > 300) {
+          // Story longer than 5 min — split into parts (~3 min each)
+          let numParts = Math.ceil(duration / 180);
+          if (numParts > 5) numParts = 5; // Max 5 parts
+
           let partLength = (duration + (numParts - 1) * 5) / numParts;
           let pStart = seg.start;
-          
+
           for (let j = 0; j < numParts; j++) {
             let pEnd = (j === numParts - 1) ? seg.end : pStart + partLength;
-            chunks.push({ 
-              ...seg, 
-              start: pStart, 
-              end: pEnd, 
-              partIndex: j + 1 
+            chunks.push({
+              ...seg,
+              start: pStart,
+              end: pEnd,
+              partIndex: j + 1
             });
             // 5 second overlap for next part
-            pStart = pEnd - 5; 
+            pStart = pEnd - 5;
           }
         } else {
-          // If story <= 7 min or > 15 min — do not split
-          chunks.push({ 
-            ...seg, 
-            partIndex: null 
+          // Story 2-5 min — keep as-is
+          chunks.push({
+            ...seg,
+            partIndex: null
           });
         }
       }
@@ -147,7 +164,7 @@ function register() {
       const whisper = new WhisperService();
       const subtitlesEnabled = !!config.subtitlesEnabled;
       const subtitleStyle    = config.subtitleStyle || 'Classic';
-      const subtitleModel    = config.subtitleModel || 'medium';
+      const subtitleModel    = config.subtitleModel || 'whisper-large-v3';
       const subtitleLanguage = config.subtitleLanguage || 'ru';
       const subtitleOptions  = {
         stylePreset:   subtitleStyle,
@@ -166,103 +183,95 @@ function register() {
       };
       console.log('[ShotShorts] Subtitle options:', JSON.stringify(subtitleOptions));
 
+      // Get Groq API key for transcription
+      let groqApiKey = null;
+      if (subtitlesEnabled) {
+        groqApiKey = await getGroqApiKey();
+        if (!groqApiKey) {
+          return { success: false, error: 'Subtitles enabled but no Groq API key configured. Add it in Settings.' };
+        }
+        whisper.setApiKey(groqApiKey);
+        whisper.setProxy(proxy);
+
+        // Make sure libass can find the chosen UI font (Inter / Montserrat /
+        // Oswald / JetBrains Mono). Best-effort: if download fails we fall
+        // back to a system font so the export never breaks.
+        try {
+          const fm = new FontManager();
+          await fm.ensureTtfFonts((msg) => send({ step: 'Preparing fonts', percent: 36, message: msg }));
+          if (fm.hasAnyTtf()) {
+            subtitleOptions.fontsDir = fm.getTtfDir();
+          } else {
+            subtitleOptions.fontFamily = 'Arial';
+            console.log('[ShotShorts] No TTF fonts cached; falling back to Arial in ASS.');
+          }
+        } catch (fontErr) {
+          console.log('[ShotShorts] FontManager.ensureTtfFonts failed:', fontErr.message);
+          subtitleOptions.fontFamily = 'Arial';
+        }
+      }
+
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
         const pBase = base + (i * per);
-        const sp = (d) => send({ 
-          step: d.step, 
-          percent: Math.min(pBase + (d.percent / 100) * per, 95), 
-          message: d.message 
+        const sp = (d) => send({
+          step: d.step,
+          percent: Math.min(pBase + (d.percent / 100) * per, 95),
+          message: d.message
         });
 
-        // --- Optional transcription via HTML→PNG→WebM (100% CSS match) ---
+        // --- Transcription via Groq API → ASS burn-in ---
         let subtitlePath = null;
-        let subtitleRenderer = null;
         if (subtitlesEnabled) {
           try {
             const chunkDuration = chunk.end - chunk.start;
-            // Extract the segment audio first (whisper needs the exact clip)
-            const segWav = path.join(os.tmpdir(), `ss_whisper_${i}_${Date.now()}.wav`);
-            tempFiles.push(segWav);
 
             sp({ step: `Transcribing Story ${chunk.index}`, percent: 0, message: 'Extracting segment audio for Whisper…' });
+            // Compress to MP3 for faster upload (~10x smaller than WAV)
+            const segMp3 = path.join(os.tmpdir(), `ss_whisper_${i}_${Date.now()}.mp3`);
+            tempFiles.push(segMp3);
             await new Promise((res, rej) => {
               const ffmpegBin = require('fluent-ffmpeg');
               ffmpegBin(audioPath)
                 .setStartTime(chunk.start)
                 .setDuration(chunkDuration)
-                .audioCodec('pcm_s16le').audioChannels(1).audioFrequency(16000)
-                .format('wav').output(segWav)
+                .audioCodec('libmp3lame').audioChannels(1).audioFrequency(16000)
+                .audioBitrate('64k')
+                .format('mp3').output(segMp3)
                 .on('end', res)
                 .on('error', (e) => rej(e))
                 .run();
             });
 
+            const mp3Size = fs.statSync(segMp3).size;
+            console.log(`[ShotShorts] MP3 file: ${(mp3Size / 1024).toFixed(0)} KB, proxy: ${proxy ? `${proxy.host}:${proxy.port}` : 'none'}`);
+
             const segments = await whisper.transcribe(
-              segWav,
-              { model: subtitleModel, language: subtitleLanguage },
+              segMp3,
+              { model: subtitleModel, language: subtitleLanguage, apiKey: groqApiKey, proxy },
               (msg) => sp({ step: `Transcribing Story ${chunk.index}`, percent: 30, message: msg })
             );
 
-            // Try HTML→PNG renderer first (100% CSS match), fallback to ASS
-            subtitleRenderer = new SubtitleRenderer();
-            const chromiumFound = subtitleRenderer.isAvailable();
-            console.log(`[ShotShorts] Chromium available: ${chromiumFound}, path: ${subtitleRenderer.chromiumPath || 'none'}`);
-            if (chromiumFound) {
-              sp({ step: `Transcribing Story ${chunk.index}`, percent: 50, message: 'Rendering subtitles via HTML→PNG…' });
-              try {
-                const subVideoPath = await subtitleRenderer.renderSubtitleTrack(
-                  segments,
-                  subtitleOptions,
-                  os.tmpdir(),
-                  (msg) => sp({ step: `Transcribing Story ${chunk.index}`, percent: 75, message: msg })
-                );
-                tempFiles.push(subVideoPath);
-                subtitlePath = subVideoPath;
-                console.log(`[ShotShorts] Subtitle video rendered: ${subVideoPath}`);
-              } catch (renderErr) {
-                console.error(`[ShotShorts] HTML subtitle render failed: ${renderErr.message}, falling back to ASS`);
-                sp({ step: `Transcribing Story ${chunk.index}`, percent: 50, message: `HTML render failed, using ASS fallback…` });
-                // Immediate ASS fallback — do not throw
-                const assContent = whisper.toASS(
-                  segments,
-                  subtitleStyle,
-                  0,
-                  subtitleOptions,
-                  subtitleOptions.caseName || 'sentence'
-                );
-                const assFile = path.join(os.tmpdir(), `ss_sub_${i}_${Date.now()}.ass`);
-                fs.writeFileSync(assFile, assContent, 'utf8');
-                tempFiles.push(assFile);
-                subtitlePath = assFile;
-                console.log(`[ShotShorts] ASS subtitle written (fallback): ${assFile}`);
-              }
-            } else {
-              console.log('[ShotShorts] Chromium not found, using ASS fallback');
-              sp({ step: `Transcribing Story ${chunk.index}`, percent: 50, message: 'Chromium not found, using ASS fallback…' });
-              const assContent = whisper.toASS(
-                segments,
-                subtitleStyle,
-                0,
-                subtitleOptions,
-                subtitleOptions.caseName || 'sentence'
-              );
-              const assFile = path.join(os.tmpdir(), `ss_sub_${i}_${Date.now()}.ass`);
-              fs.writeFileSync(assFile, assContent, 'utf8');
-              tempFiles.push(assFile);
-              subtitlePath = assFile;
-              console.log(`[ShotShorts] ASS subtitle written: ${assFile}`);
-            }
+            // Generate ASS subtitle file directly (no Playwright/Chromium needed)
+            sp({ step: `Transcribing Story ${chunk.index}`, percent: 80, message: 'Generating subtitles…' });
+            const assContent = whisper.toASS(
+              segments,
+              subtitleStyle,
+              0,
+              subtitleOptions,
+              subtitleOptions.caseName || 'sentence'
+            );
+            const assFile = path.join(os.tmpdir(), `ss_sub_${i}_${Date.now()}.ass`);
+            fs.writeFileSync(assFile, assContent, 'utf8');
+            tempFiles.push(assFile);
+            subtitlePath = assFile;
+            console.log(`[ShotShorts] ASS subtitle written: ${assFile}`);
 
-            sp({ step: `Transcribing Story ${chunk.index}`, percent: 100, message: 'Subtitles ready ✓' });
+            sp({ step: `Transcribing Story ${chunk.index}`, percent: 100, message: 'Subtitles ready' });
           } catch (whisperErr) {
             const failMsg = `Subtitles failed for story ${chunk.index}: ${whisperErr.message}`;
             send({ step: `Story ${chunk.index}`, percent: 0, message: failMsg });
             throw new Error(failMsg);
-          } finally {
-            if (subtitleRenderer) {
-              try { await subtitleRenderer.close(); } catch {}
-            }
           }
         }
 

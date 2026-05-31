@@ -5,12 +5,12 @@ const os = require('os');
 
 const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.avi', '.mov', '.webm', '.m4v']);
 const SRT_STYLE_PRESETS = {
-  Classic: { PrimaryColour: '&H00FFFFFF', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 1, Outline: 2, Shadow: 1, BorderStyle: 1 },
-  Minimal: { PrimaryColour: '&H00E5E7EB', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 0, Outline: 1.3, Shadow: 0.3, BorderStyle: 1 },
-  Highlight: { PrimaryColour: '&H0000FFFF', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 1, Outline: 2.6, Shadow: 2, BorderStyle: 1 },
-  TikTokBold: { PrimaryColour: '&H00FFFFFF', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 1, Outline: 3.2, Shadow: 2.4, BorderStyle: 1 },
-  HeavyShadow: { PrimaryColour: '&H00FFFFFF', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 1, Outline: 3.2, Shadow: 4.8, BorderStyle: 1 },
-  SoftBox: { PrimaryColour: '&H00F2F2F2', OutlineColour: '&H00202020', BackColour: '&H96000000', Bold: 1, Outline: 1.4, Shadow: 0.8, BorderStyle: 3 }
+  Classic: { PrimaryColour: '&H00FFFFFF', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 1, Outline: 3, Shadow: 2, BorderStyle: 1 },
+  Minimal: { PrimaryColour: '&H00E5E7EB', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 0, Outline: 1.5, Shadow: 1.5, BorderStyle: 1 },
+  Highlight: { PrimaryColour: '&H0066E0FF', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 1, Outline: 3.5, Shadow: 3, BorderStyle: 1 },
+  TikTokBold: { PrimaryColour: '&H00FFFFFF', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 1, Outline: 5, Shadow: 5, BorderStyle: 1 },
+  HeavyShadow: { PrimaryColour: '&H00FFFFFF', OutlineColour: '&H00000000', BackColour: '&H00000000', Bold: 1, Outline: 5, Shadow: 8, BorderStyle: 1 },
+  SoftBox: { PrimaryColour: '&H00F2F2F2', OutlineColour: '&H30FFFFFF', BackColour: '&H7A000000', Bold: 1, Outline: 2, Shadow: 1.5, BorderStyle: 3 }
 };
 
 class MediaProcessor {
@@ -75,6 +75,20 @@ class MediaProcessor {
       .replace(/\]/g, '\\]')
       .replace(/;/g, '\\;')
       .replace(/ /g, '\\ ');
+  }
+
+  /**
+   * Build the ffmpeg `ass=...` filter argument including `fontsdir=` when
+   * available. Both paths are escaped for the libavfilter parser.
+   */
+  _buildAssFilterArgs(subtitlePath, subtitleOptions = {}) {
+    const escapedSubs = this._escapeSubtitlePathForFilter(subtitlePath);
+    const fontsDir = subtitleOptions && subtitleOptions.fontsDir;
+    if (fontsDir && fs.existsSync(fontsDir)) {
+      const escapedFonts = this._escapeSubtitlePathForFilter(fontsDir);
+      return `ass='${escapedSubs}':fontsdir='${escapedFonts}'`;
+    }
+    return `ass='${escapedSubs}'`;
   }
 
   extractAudio(videoPath, onProgress) {
@@ -147,10 +161,11 @@ class MediaProcessor {
     });
     if (this.cancelled) throw new Error('Cancelled');
 
-    // Build background list
+    // Build background list — add 5s safety margin to prevent video freezing
+    // before audio ends due to PTS rounding in concat filter
     let totalDur = 0;
     const selected = [];
-    const maxSafetyDur = duration;
+    const maxSafetyDur = duration + 5;
 
     while (totalDur < maxSafetyDur) {
       if (bgContext.unused.length === 0) {
@@ -242,7 +257,7 @@ class MediaProcessor {
             const ext = path.extname(subtitlePath).toLowerCase();
             console.log(`[ShotShorts] Escaped subtitle path: ${escaped}`);
             if (ext === '.ass') {
-              filterStrings.push(`[vconcat]ass='${escaped}'[vout]`);
+              filterStrings.push(`[vconcat]${this._buildAssFilterArgs(subtitlePath, subtitleOptions)}[vout]`);
             } else {
               const forceStyle = this._buildSrtForceStyle(subtitleOptions);
               filterStrings.push(`[vconcat]subtitles='${escaped}':charenc=UTF-8:force_style='${forceStyle}'[vout]`);
@@ -253,13 +268,14 @@ class MediaProcessor {
           filterStrings.push(`[vconcat]null[vout]`);
         }
 
-        const audioInputIndex = isSubtitleVideo ? selected.length + 2 : selected.length + 1;
+        const audioInputIndex = selected.length;
         cmd.complexFilter(filterStrings)
           .outputOptions([
             '-t', String(duration),
             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
             '-c:a', 'aac', '-b:a', '192k',
-            '-map', '[vout]', '-map', `${selected.length}:a:0`,
+            '-map', '[vout]', '-map', `${audioInputIndex}:a:0`,
+            '-shortest',
             '-movflags', '+faststart'
           ])
           .output(outFile)
@@ -315,7 +331,7 @@ class MediaProcessor {
               const escaped = this._escapeSubtitlePathForFilter(subtitlePath);
               const ext = path.extname(subtitlePath).toLowerCase();
               if (ext === '.ass') {
-                fallbackFilters.push(`[vscaled]ass='${escaped}'[vout]`);
+                fallbackFilters.push(`[vscaled]${this._buildAssFilterArgs(subtitlePath, subtitleOptions)}[vout]`);
               } else {
                 const forceStyle = this._buildSrtForceStyle(subtitleOptions);
                 fallbackFilters.push(`[vscaled]subtitles='${escaped}':charenc=UTF-8:force_style='${forceStyle}'[vout]`);

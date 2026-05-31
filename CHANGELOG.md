@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **API Provider Selection** — теперь можно выбирать между OpenRouter и NVIDIA NIM для анализа аудио
+- **NVIDIA NIM Support** — прямой доступ к `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` через NVIDIA API (избегает ошибки 402 от OpenRouter)
+- **NVIDIA NIM API Keys** — поддержка нескольких ключей `nvapi-…` с ротацией при лимитах
+
+### Changed
+- Полностью переработана архитектура API-клиентов: общий базовый класс `BaseAudioClient` + наследники `OpenRouterClient` и `NvidiaClient`
+- Обновлён интерфейс: добавлен селект провайдера, раздельные секции для ключей OpenRouter и NVIDIA NIM
+- Обновлена документация (`README.md`) — убраны упоминания Gemini AI, добавлены инструкции для OpenRouter и NVIDIA NIM
+
 
 ## [2.0.2] - 2026-02-04
 - **New Skills**:

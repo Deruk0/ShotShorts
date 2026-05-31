@@ -1,5 +1,5 @@
 // ===== STATE =====
-let settings = { apiKeys: [], proxy: null };
+let settings = { apiProvider: 'openrouter', apiKeys: [], nvidiaApiKeys: [], proxy: null };
 let stats = { totalVideos: 0, totalRenderTimeMs: 0, lastRun: null };
 let sourcePath = null;
 let bgFolderPath = null;
@@ -45,7 +45,7 @@ const I18N = {
     tabs: { generator: '⚡ Generator', settings: '⚙ Settings' },
     status: { ready: 'Ready', processing: 'Processing…', done: 'Complete', error: 'Error', idle: 'Ready' },
     buttons: { generate: '⚡ Generate Videos ⚡', cancel: 'Cancel', add: 'Add', resetStats: 'Reset Statistics' },
-    warnings: { noKeys: 'Add at least one Gemini API key in Settings before generating.' },
+    warnings: { noKeys: 'Add at least one OpenRouter API key in Settings before generating.', noKeysNvidia: 'Add at least one NVIDIA NIM API key in Settings before generating.' },
     labels: {
       sourceTitle: 'Source Video (with stories)',
       bgTitle: 'Background Videos Folder',
@@ -55,8 +55,14 @@ const I18N = {
       outputPlaceholder: 'Click to select where to save generated videos…',
       appLangTitle: 'App Language',
       interfaceLangLabel: 'Interface Language',
-      geminiTitle: 'Gemini API Keys',
-      keysHint: 'Add at least one API key to use the generator. Keys rotate automatically on rate-limit errors.',
+      apiProviderTitle: 'API Provider',
+      providerOpenRouter: 'OpenRouter',
+      providerNvidia: 'NVIDIA NIM',
+      apiKeysTitle: 'OpenRouter API Keys',
+      nvidiaKeysTitle: 'NVIDIA NIM API Keys',
+      keysHint: 'Add at least one OpenRouter API key to use the generator. Keys rotate automatically on rate-limit errors.',
+      nvidiaKeysHint: 'Add at least one NVIDIA NIM API key to use the generator. Keys rotate automatically on rate-limit errors.',
+      nvidiaPlaceholder: 'nvapi-… paste NVIDIA NIM key here',
       proxyTitle: 'Proxy Configuration',
       enable: 'Enable',
       proxyType: 'Type',
@@ -78,19 +84,25 @@ const I18N = {
       subKaraoke: 'Karaoke Mode',
       subKaraokeWord: 'Word highlight',
       subKaraokeMode: 'Karaoke Effect',
-      subHint: 'First run will install PyTorch + openai-whisper and download the model automatically. Requires Python 3.9+ in PATH.',
+      subHint: 'Transcription uses Groq Whisper API. Add your Groq API key above.',
+      groqKeyTitle: 'Groq API Key',
+      groqKeyHint: 'Required for subtitle transcription via Groq Whisper API.',
       statsTitle: 'Statistics',
       statTotal: 'Total Videos',
       statTime: 'Total Render Time',
       statAvg: 'Avg Per Video',
-      statLast: 'Last Run'
+      statLast: 'Last Run',
+      eta: {
+        remaining: 'Remaining',
+        waiting: 'Waiting for response…'
+      }
     }
   },
   ru: {
     tabs: { generator: '⚡ Генератор', settings: '⚙ Настройки' },
     status: { ready: 'Готово', processing: 'Обработка…', done: 'Завершено', error: 'Ошибка', idle: 'Готово' },
     buttons: { generate: '⚡ Создать видео ⚡', cancel: 'Отмена', add: 'Добавить', resetStats: 'Сбросить статистику' },
-    warnings: { noKeys: 'Добавь хотя бы один Gemini API ключ во вкладке настроек перед запуском.' },
+    warnings: { noKeys: 'Добавь хотя бы один OpenRouter API ключ во вкладке настроек перед запуском.', noKeysNvidia: 'Добавь хотя бы один NVIDIA NIM API ключ во вкладке настроек перед запуском.' },
     labels: {
       sourceTitle: 'Исходное видео (с историями)',
       bgTitle: 'Папка с фоновыми видео',
@@ -100,8 +112,14 @@ const I18N = {
       outputPlaceholder: 'Нажми, чтобы выбрать папку сохранения…',
       appLangTitle: 'Язык приложения',
       interfaceLangLabel: 'Язык интерфейса',
-      geminiTitle: 'Gemini API ключи',
-      keysHint: 'Добавь хотя бы один API ключ для работы генератора. При лимитах ключи переключаются автоматически.',
+      apiProviderTitle: 'Провайдер API',
+      providerOpenRouter: 'OpenRouter',
+      providerNvidia: 'NVIDIA NIM',
+      apiKeysTitle: 'OpenRouter API ключи',
+      nvidiaKeysTitle: 'NVIDIA NIM API ключи',
+      keysHint: 'Добавь хотя бы один OpenRouter API ключ для работы генератора. При лимитах ключи переключаются автоматически.',
+      nvidiaKeysHint: 'Добавь хотя бы один NVIDIA NIM API ключ для работы генератора. При лимитах ключи переключаются автоматически.',
+      nvidiaPlaceholder: 'nvapi-… вставь NVIDIA NIM ключ сюда',
       proxyTitle: 'Настройки прокси',
       enable: 'Включить',
       proxyType: 'Тип',
@@ -123,12 +141,18 @@ const I18N = {
       subKaraoke: 'Караоке режим',
       subKaraokeWord: 'Подсветка слов',
       subKaraokeMode: 'Эффект караоке',
-      subHint: 'При первом запуске автоматически установятся PyTorch + openai-whisper и модель. Нужен Python 3.9+ в PATH.',
+      subHint: 'Транскрипция через Groq Whisper API. Добавь Groq API ключ выше.',
+      groqKeyTitle: 'Groq API ключ',
+      groqKeyHint: 'Нужен для транскрипции субтитров через Groq Whisper API.',
       statsTitle: 'Статистика',
       statTotal: 'Всего видео',
       statTime: 'Общее время рендера',
       statAvg: 'Среднее на видео',
-      statLast: 'Последний запуск'
+      statLast: 'Последний запуск',
+      eta: {
+        remaining: 'Осталось',
+        waiting: 'Осталось: ожидание ответа…'
+      }
     }
   }
 };
@@ -154,8 +178,18 @@ function applyTranslations() {
   const oTitle = $('#txt-output-title'); if (oTitle) oTitle.textContent = t('labels.outputTitle');
   const alTitle = $('#txt-app-lang-title'); if (alTitle) alTitle.textContent = t('labels.appLangTitle');
   const alLabel = $('#txt-interface-lang-label'); if (alLabel) alLabel.textContent = t('labels.interfaceLangLabel');
-  const g = $('#txt-gemini-title'); if (g) g.textContent = t('labels.geminiTitle');
+  const apt = $('#txt-api-provider-title'); if (apt) apt.textContent = t('labels.apiProviderTitle');
+  const ap = $('#api-provider');
+  if (ap) {
+    if (ap.options[0]) ap.options[0].text = t('labels.providerOpenRouter');
+    if (ap.options[1]) ap.options[1].text = t('labels.providerNvidia');
+  }
+  const g = $('#txt-api-keys-title'); if (g) g.textContent = t('labels.apiKeysTitle');
+  const nkt = $('#txt-nvidia-keys-title'); if (nkt) nkt.textContent = t('labels.nvidiaKeysTitle');
   const kh = $('#keys-hint'); if (kh) kh.textContent = t('labels.keysHint');
+  const nkh = $('#nvidia-keys-hint'); if (nkh) nkh.textContent = t('labels.nvidiaKeysHint');
+  const nkw = $('#no-keys-warning');
+  if (nkw) nkw.textContent = settings.apiProvider === 'nvidia' ? t('warnings.noKeysNvidia') : t('warnings.noKeys');
   const pt = $('#txt-proxy-title'); if (pt) pt.textContent = t('labels.proxyTitle');
   const ep = $('#txt-enable-proxy'); if (ep) ep.textContent = t('labels.enable');
   const es = $('#txt-enable-subtitles'); if (es) es.textContent = t('labels.enable');
@@ -179,6 +213,8 @@ function applyTranslations() {
   const skw = $('#txt-sub-karaoke-word'); if (skw) skw.textContent = t('labels.subKaraokeWord');
   const skm = $('#txt-sub-karaoke-mode'); if (skm) skm.textContent = t('labels.subKaraokeMode');
   const sh = $('#txt-sub-hint'); if (sh) sh.textContent = t('labels.subHint');
+  const gkt = $('#txt-groq-key'); if (gkt) gkt.textContent = t('labels.groqKeyTitle');
+  const gkh = $('#groq-key-hint'); if (gkh) gkh.textContent = t('labels.groqKeyHint');
   const sTitle2 = $('#txt-stats-title'); if (sTitle2) sTitle2.textContent = t('labels.statsTitle');
   const st1 = $('#txt-stat-total'); if (st1) st1.textContent = t('labels.statTotal');
   const st2 = $('#txt-stat-time'); if (st2) st2.textContent = t('labels.statTime');
@@ -195,11 +231,13 @@ async function loadSettings() {
   try {
     settings = await window.api.getSettings() || { apiKeys: [], proxy: null };
     settings = {
+      apiProvider: 'openrouter',
       apiKeys: [],
+      nvidiaApiKeys: [],
       proxy: null,
       subtitlesEnabled: false,
       subtitleStyle: 'Classic',
-      subtitleModel: 'small',
+      subtitleModel: 'whisper-large-v3',
       subtitleLanguage: 'ru',
       subtitlePosition: 'bottom',
       subtitleWordsPerLine: 3,
@@ -207,22 +245,29 @@ async function loadSettings() {
       subtitleFontSize: 20,
       subtitleFontFamily: 'Inter',
       subtitleMarginV: 40,
-      subtitleCase: 'sentence',
       subtitleKaraoke: false,
       subtitleKaraokeMode: 'highlight',
       subtitleKaraokeEffects: ['highlight'],
+      groqApiKey: '',
       appLanguage: 'en',
       ...settings
     };
     if (!settings.apiKeys) settings.apiKeys = [];
+    if (!settings.nvidiaApiKeys) settings.nvidiaApiKeys = [];
+    if (!settings.groqApiKey) settings.groqApiKey = '';
+    // Legacy cleanup: remove old Gemini keys (starting with AIzaSy)
+    settings.apiKeys = settings.apiKeys.filter(k => !k.startsWith('AIzaSy'));
+    settings.nvidiaApiKeys = settings.nvidiaApiKeys.filter(k => !k.startsWith('AIzaSy'));
   } catch (err) {
     console.error('Failed to load settings:', err);
     settings = {
+      apiProvider: 'openrouter',
       apiKeys: [],
+      nvidiaApiKeys: [],
       proxy: null,
       subtitlesEnabled: false,
       subtitleStyle: 'Classic',
-      subtitleModel: 'small',
+      subtitleModel: 'whisper-large-v3',
       subtitleLanguage: 'ru',
       subtitlePosition: 'bottom',
       subtitleWordsPerLine: 3,
@@ -233,6 +278,7 @@ async function loadSettings() {
       subtitleKaraoke: false,
       subtitleKaraokeMode: 'highlight',
       subtitleKaraokeEffects: ['highlight']
+      ,groqApiKey: ''
       ,appLanguage: 'en'
     };
   }
@@ -314,19 +360,150 @@ function removeKey(index) {
   updateGenerateBtn();
 }
 
+function updateNoKeysWarning() {
+  const isNvidia = settings.apiProvider === 'nvidia';
+  const keysEmpty = isNvidia ? settings.nvidiaApiKeys.length === 0 : settings.apiKeys.length === 0;
+  $('#no-keys-warning').style.display = keysEmpty ? '' : 'none';
+}
+
 function renderKeys() {
   const list = $('#key-list');
   list.innerHTML = '';
   settings.apiKeys.forEach((key, i) => {
     const tag = document.createElement('span');
     tag.className = 'key-tag';
-    tag.innerHTML = `${key.slice(0,8)}…${key.slice(-4)} <button class="remove" title="Remove key">✕</button>`;
-    tag.querySelector('.remove').addEventListener('click', () => removeKey(i));
+    tag.textContent = `${key.slice(0,8)}…${key.slice(-4)} `;
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove';
+    removeBtn.title = 'Remove key';
+    removeBtn.textContent = '✕';
+    removeBtn.addEventListener('click', () => removeKey(i));
+    tag.appendChild(removeBtn);
     list.appendChild(tag);
   });
   $('#keys-hint').style.display = settings.apiKeys.length > 0 ? 'none' : '';
-  $('#key-count').textContent = `${settings.apiKeys.length} API key${settings.apiKeys.length !== 1 ? 's' : ''} configured`;
-  $('#no-keys-warning').style.display = settings.apiKeys.length === 0 ? '' : 'none';
+  updateKeyCount();
+  updateNoKeysWarning();
+}
+
+// ===== SETTINGS: NVIDIA API KEYS =====
+$('#nvidia-key-input').addEventListener('input', () => {
+  $('#btn-add-nvidia-key').disabled = !$('#nvidia-key-input').value.trim();
+});
+
+$('#nvidia-key-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') addNvidiaKey();
+});
+
+$('#btn-add-nvidia-key').addEventListener('click', addNvidiaKey);
+
+function addNvidiaKey() {
+  const val = $('#nvidia-key-input').value.trim();
+  if (!val || settings.nvidiaApiKeys.includes(val)) return;
+  settings.nvidiaApiKeys.push(val);
+  saveSettings();
+  $('#nvidia-key-input').value = '';
+  $('#btn-add-nvidia-key').disabled = true;
+  renderNvidiaKeys();
+  updateGenerateBtn();
+}
+
+function removeNvidiaKey(index) {
+  settings.nvidiaApiKeys.splice(index, 1);
+  saveSettings();
+  renderNvidiaKeys();
+  updateGenerateBtn();
+}
+
+function renderNvidiaKeys() {
+  const list = $('#nvidia-key-list');
+  list.innerHTML = '';
+  settings.nvidiaApiKeys.forEach((key, i) => {
+    const tag = document.createElement('span');
+    tag.className = 'key-tag';
+    tag.textContent = `${key.slice(0,8)}…${key.slice(-4)} `;
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove';
+    removeBtn.title = 'Remove key';
+    removeBtn.textContent = '✕';
+    removeBtn.addEventListener('click', () => removeNvidiaKey(i));
+    tag.appendChild(removeBtn);
+    list.appendChild(tag);
+  });
+  $('#nvidia-keys-hint').style.display = settings.nvidiaApiKeys.length > 0 ? 'none' : '';
+  updateKeyCount();
+  updateNoKeysWarning();
+}
+
+// ===== SETTINGS: GROQ API KEY =====
+$('#groq-key-input').addEventListener('input', () => {
+  $('#btn-add-groq-key').disabled = !$('#groq-key-input').value.trim();
+});
+
+$('#groq-key-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') addGroqKey();
+});
+
+$('#btn-add-groq-key').addEventListener('click', addGroqKey);
+
+function addGroqKey() {
+  const val = $('#groq-key-input').value.trim();
+  if (!val) return;
+  settings.groqApiKey = val;
+  saveSettings();
+  $('#groq-key-input').value = '';
+  $('#btn-add-groq-key').disabled = true;
+  renderGroqKey();
+}
+
+function removeGroqKey() {
+  settings.groqApiKey = '';
+  saveSettings();
+  renderGroqKey();
+}
+
+function renderGroqKey() {
+  const list = $('#groq-key-list');
+  const hint = $('#groq-key-hint');
+  const input = $('#groq-key-input');
+  list.innerHTML = '';
+
+  if (settings.groqApiKey) {
+    const key = settings.groqApiKey;
+    const tag = document.createElement('span');
+    tag.className = 'key-tag';
+    tag.textContent = `${key.slice(0, 6)}…${key.slice(-4)} `;
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove';
+    removeBtn.title = 'Remove key';
+    removeBtn.textContent = '✕';
+    removeBtn.addEventListener('click', removeGroqKey);
+    tag.appendChild(removeBtn);
+    list.appendChild(tag);
+    hint.style.display = 'none';
+    input.placeholder = 'gsk_… replace Groq API key';
+  } else {
+    hint.style.display = '';
+    hint.textContent = t('labels.groqKeyHint');
+    input.placeholder = 'gsk_… paste Groq API key here';
+  }
+}
+
+// ===== API PROVIDER SWITCH =====
+$('#api-provider').addEventListener('change', () => {
+  settings.apiProvider = $('#api-provider').value;
+  updateProviderUI();
+  saveSettings();
+  applyTranslations();
+});
+
+function updateProviderUI() {
+  const isNvidia = settings.apiProvider === 'nvidia';
+  $('#keys-section-openrouter').style.display = isNvidia ? 'none' : '';
+  $('#keys-section-nvidia').style.display = isNvidia ? '' : 'none';
+  updateNoKeysWarning();
+  updateKeyCount();
+  updateGenerateBtn();
 }
 
 // ===== SETTINGS: PROXY =====
@@ -367,9 +544,16 @@ const SUBTITLE_STYLE_FONT_SIZES = {
 };
 
 function syncSubtitleStyleFontSize() {
+  // Apply preset default font size ONLY if the user hasn't customized it yet
+  // (current value matches some other preset's default). This avoids silently
+  // overriding a manually chosen font size.
   const style = $('#subtitle-style')?.value || 'Classic';
   const presetSize = SUBTITLE_STYLE_FONT_SIZES[style];
-  if (presetSize) {
+  if (!presetSize) return;
+  const currentSize = Number($('#subtitle-font-size')?.value || 0);
+  const presetValues = new Set(Object.values(SUBTITLE_STYLE_FONT_SIZES));
+  const looksLikePresetDefault = presetValues.has(currentSize);
+  if (looksLikePresetDefault && currentSize !== presetSize) {
     $('#subtitle-font-size').value = String(presetSize);
     settings.subtitleFontSize = presetSize;
   }
@@ -456,8 +640,16 @@ $('#app-language').addEventListener('change', () => {
 });
 
 
+function updateKeyCount() {
+  const count = settings.apiProvider === 'nvidia' ? settings.nvidiaApiKeys.length : settings.apiKeys.length;
+  $('#key-count').textContent = `${count} API key${count !== 1 ? 's' : ''} configured`;
+}
+
 function updateGenerateBtn() {
-  const canStart = sourcePath && bgFolderPath && outputFolderPath && settings.apiKeys.length > 0 && !isProcessing;
+  const keysOk = settings.apiProvider === 'nvidia'
+    ? settings.nvidiaApiKeys.length > 0
+    : settings.apiKeys.length > 0;
+  const canStart = sourcePath && bgFolderPath && outputFolderPath && keysOk && !isProcessing;
   $('#btn-generate').disabled = !canStart;
 }
 
@@ -490,7 +682,7 @@ async function startGeneration() {
       outputFolder: outputFolderPath,
       subtitlesEnabled: !!settings.subtitlesEnabled,
       subtitleStyle: settings.subtitleStyle || 'Classic',
-      subtitleModel: settings.subtitleModel || 'small',
+      subtitleModel: settings.subtitleModel || 'whisper-large-v3',
       subtitleLanguage: settings.subtitleLanguage || 'ru',
       subtitlePosition: settings.subtitlePosition || 'bottom',
       subtitleWordsPerLine: Number(settings.subtitleWordsPerLine || 3),
@@ -554,7 +746,10 @@ function cancelGeneration() {
 function setControlsDisabled(disabled) {
   const selectors = [
     '#pick-source', '#pick-background', '#pick-output',
-    '#key-input', '#btn-add-key', '#proxy-toggle',
+    '#api-provider',
+    '#key-input', '#btn-add-key',
+    '#nvidia-key-input', '#btn-add-nvidia-key',
+    '#proxy-toggle',
     '#proxy-type', '#proxy-host', '#proxy-port', '#proxy-user', '#proxy-pass',
     '#subtitles-toggle', '#subtitle-style', '#subtitle-model', '#subtitle-language',
     '#subtitle-position', '#subtitle-words-per-line', '#subtitle-max-line-ms', '#subtitle-font-size', '#subtitle-font-family', '#subtitle-margin-v', '#subtitle-karaoke',
@@ -623,7 +818,7 @@ function showProgress(step, percent, message) {
         const speed = dp / dt;
         const remaining = (100 - last.percent) / speed;
         $('#progress-eta').style.display = '';
-        $('#progress-eta').textContent = `Осталось: ${formatDuration(remaining)}`;
+        $('#progress-eta').textContent = `${t('labels.eta.remaining')}: ${formatDuration(remaining)}`;
       }
     }
   }
@@ -647,7 +842,7 @@ function updateEta() {
   const stalledMs = Date.now() - lastProgressTime;
   if (stalledMs > 10000 && lastProgressPercent > 0 && lastProgressPercent < 100) {
     $('#progress-eta').style.display = '';
-    $('#progress-eta').textContent = 'Осталось: ожидание ответа…';
+    $('#progress-eta').textContent = t('labels.eta.waiting');
     return;
   }
 
@@ -667,7 +862,7 @@ function updateEta() {
   if (dp > 0.5 && dt > 1000) {
     const speed = dp / dt;
     const remaining = (100 - last.percent) / speed;
-    $('#progress-eta').textContent = `Осталось: ${formatDuration(remaining)}`;
+    $('#progress-eta').textContent = `${t('labels.eta.remaining')}: ${formatDuration(remaining)}`;
   }
 }
 
@@ -690,10 +885,11 @@ function renderPreviewChunk(textEl, phrase, karaoke, karaokeEffects = ['highligh
   const current = subtitlePreviewChunks[subtitlePreviewChunkIndex % subtitlePreviewChunks.length] || phrase;
   const effects = new Set(Array.isArray(karaokeEffects) ? karaokeEffects : []);
   const applyCase = (value) => {
-    if (caseName === 'uppercase') return String(value || '').toUpperCase();
-    if (caseName === 'lowercase') return String(value || '').toLowerCase();
-    const lower = String(value || '').toLowerCase();
-    return lower ? lower.charAt(0).toUpperCase() + lower.slice(1) : lower;
+    const v = String(value || '');
+    if (caseName === 'uppercase') return v.toUpperCase();
+    if (caseName === 'lowercase') return v.toLowerCase();
+    if (!v) return v;
+    return v.charAt(0).toUpperCase() + v.slice(1);
   };
   if (karaoke) {
     const words = applyCase(current).split(' ');
@@ -714,14 +910,18 @@ function renderPreviewChunk(textEl, phrase, karaoke, karaokeEffects = ['highligh
 
 function updateSubtitlePreview() {
   const stage = $('#subtitle-preview-stage');
+  const frame = $('#subtitle-preview-frame');
   const overlay = $('#subtitle-preview-overlay');
   const text = $('#subtitle-preview-text');
   if (!stage || !overlay || !text) return;
 
   const enabled = !!$('#subtitles-toggle')?.checked;
+  // Real ASS values (PlayRes 1080x1920). Preview uses these directly inside
+  // a 1080x1920 frame that is scaled down via CSS transform — so visual
+  // proportions match the exported video exactly.
   const realFontSize = Math.max(12, Number($('#subtitle-font-size')?.value || 20));
-  const previewFontSize = realFontSize;
   const marginV = Math.max(10, Number($('#subtitle-margin-v')?.value || 40));
+  const marginH = 40; // matches ASS_STYLES.*.marginH default
   const wordsPerLine = Math.max(1, Number($('#subtitle-words-per-line')?.value || 3));
   const lineMs = Math.max(300, Number($('#subtitle-max-line-ms')?.value || 1200));
   const fontFamily = $('#subtitle-font-family')?.value || 'Inter';
@@ -734,9 +934,12 @@ function updateSubtitlePreview() {
     ? 'Это пример предпросмотра отображения субтитров в вашем стиле'
     : 'This is a live subtitle preview phrase in your design style';
 
+  // Apply ASS-equivalent values directly (px == ASS unit thanks to scaled frame).
   overlay.style.fontFamily = `'${fontFamily}', sans-serif`;
-  overlay.style.fontSize = `${previewFontSize}px`;
+  overlay.style.fontSize = `${realFontSize}px`;
   overlay.style.opacity = enabled ? '1' : '0.45';
+  overlay.style.left = `${marginH}px`;
+  overlay.style.right = `${marginH}px`;
   overlay.classList.remove(
     'preview-style-classic',
     'preview-style-minimal',
@@ -769,7 +972,9 @@ function updateSubtitlePreview() {
     renderPreviewChunk(text, phrase, karaoke, karaokeEffects, caseName);
   }, lineMs);
 
-  // Position: apply to preview overlay
+  // Position: apply to preview overlay in real ASS coordinates.
+  // ASS Alignment 8 (top): MarginV from top. ASS Alignment 2 (bottom): MarginV from bottom.
+  // ASS Alignment 5 (middle): vertically centered, MarginV ignored.
   overlay.style.top = '';
   overlay.style.bottom = '';
   overlay.style.transform = '';
@@ -781,9 +986,15 @@ function updateSubtitlePreview() {
     overlay.style.transform = 'translateY(-50%)';
     overlay.style.bottom = 'auto';
   } else {
-    // bottom (default)
     overlay.style.bottom = `${marginV}px`;
     overlay.style.top = 'auto';
+  }
+
+  // Fit the 1080x1920 frame inside the stage by scaling it.
+  if (frame) {
+    const stageWidth = stage.clientWidth || 1;
+    const scale = stageWidth / 1080;
+    frame.style.transform = `scale(${scale})`;
   }
 
   // Collapse preview when subtitles are disabled, otherwise expand
@@ -854,7 +1065,10 @@ async function init() {
   await loadSettings();
   await loadStats();
   renderKeys();
-  renderStats();
+  renderNvidiaKeys();
+  renderGroqKey();
+  $('#api-provider').value = settings.apiProvider || 'openrouter';
+  updateProviderUI();
   updateGenerateBtn();
 
   if (settings.proxy) {
@@ -895,6 +1109,19 @@ async function init() {
   setSelectedKaraokeEffects(savedEffects);
   $('#subtitle-case').value = settings.subtitleCase || 'sentence';
   updateSubtitlePreview();
+  // Recompute preview scale on window resize so the 1080x1920 frame keeps
+  // fitting the available stage width.
+  let __subPreviewResizeRaf = 0;
+  window.addEventListener('resize', () => {
+    if (__subPreviewResizeRaf) cancelAnimationFrame(__subPreviewResizeRaf);
+    __subPreviewResizeRaf = requestAnimationFrame(() => {
+      const stage = document.getElementById('subtitle-preview-stage');
+      const frame = document.getElementById('subtitle-preview-frame');
+      if (!stage || !frame) return;
+      const w = stage.clientWidth || 1;
+      frame.style.transform = `scale(${w / 1080})`;
+    });
+  });
 }
 
 init();
