@@ -62,17 +62,23 @@ class NvidiaClient extends BaseAudioClient {
         },
       ],
       temperature: 0.0,
-      max_tokens: 65536,
+      // Bounded so a degenerate repetition loop can't run to 65k tokens (a 5-min
+      // chunk needs only a few hundred tokens of JSON). 16k leaves ample room.
+      max_tokens: 16384,
       reasoning_budget: 8192,
       grace_period: 1024,
+      // Anti-degeneration: reasoning models at temp=0 are prone to repeating the
+      // same object forever. Penalties discourage the loop without hurting accuracy.
+      frequency_penalty: 0.5,
+      presence_penalty: 0.3,
     };
   }
 
   // Override _callApi: NVIDIA reasoning models put final JSON in 'content', reasoning in 'reasoning'
   async _callApi(apiKey, audioBase64, prompt, onProgress) {
     const masked = apiKey.slice(0, 6) + '…' + apiKey.slice(-4);
-    console.log(`[NvidiaClient] Calling NVIDIA NIM with key ${masked}`);
-    onProgress?.('Sending audio to NVIDIA Nemotron AI via NVIDIA NIM…');
+    console.log(`[${this.constructor.name}] Calling ${this.providerName} with key ${masked}`);
+    onProgress?.(`Sending audio to NVIDIA Nemotron AI via ${this.providerName}…`);
 
     const payload = this._buildPayload(audioBase64, prompt);
     const axiosConfig = this._buildAxiosConfig();
@@ -208,7 +214,7 @@ class NvidiaClient extends BaseAudioClient {
           .run();
       });
 
-      chunks.push({ path: outPath, offset: start });
+      chunks.push({ path: outPath, offset: start, duration });
       onProgress?.(`Prepared chunk ${index + 1}: ${start.toFixed(1)}s - ${(start + duration).toFixed(1)}s`);
       start += chunkDurationSec;
       index++;
@@ -352,8 +358,16 @@ Rules: no merging, no skipping. Stories may start at 0.0 (continued from previou
             throw new Error(`NVIDIA NIM analysis failed on chunk ${i + 1}/${chunks.length}. Error: ${err.message}. Please try again with a shorter video or use OpenRouter provider.`);
           }
 
-          // Adjust timestamps by chunk offset
+          // Drop segments whose timestamps fall outside this chunk's real duration
+          // (degenerate models hallucinate timestamps far past the audio length),
+          // then adjust by the chunk's offset into the full recording.
+          const chunkLen = chunk.duration || (NvidiaClient.CHUNK_DURATION_MIN * 60 + NvidiaClient.CHUNK_OVERLAP_SEC);
+          const tolerance = 2; // small slack for rounding
           for (const seg of chunkSegments) {
+            if (seg.start > chunkLen + tolerance || seg.end > chunkLen + tolerance) {
+              console.log(`[NvidiaClient] Dropping out-of-range segment in chunk ${i + 1}: ${seg.start}-${seg.end}s (chunk is ${chunkLen.toFixed(1)}s)`);
+              continue;
+            }
             allSegments.push({
               ...seg,
               start: seg.start + chunk.offset,

@@ -12,10 +12,12 @@ class BaseAudioClient {
 
   static _keyCooldowns = new Map();
   static _keyUsageCount = new Map();
+  static _keyFailureCount = new Map();
 
   static reset() {
     BaseAudioClient._keyCooldowns.clear();
     BaseAudioClient._keyUsageCount.clear();
+    BaseAudioClient._keyFailureCount.clear();
   }
 
   constructor(keys, proxy) {
@@ -109,14 +111,18 @@ class BaseAudioClient {
   }
 
   _getAvailableKey() {
+    // Rank by total attempts (successes + failures) so that a key which just
+    // failed is deprioritized and the next attempt rotates to a fresh key.
     let bestKey = null;
-    let bestUsage = Infinity;
+    let bestScore = Infinity;
     for (const key of this.keys) {
       if (this._isOnCooldown(key)) continue;
       const usage = BaseAudioClient._keyUsageCount.get(key) || 0;
-      if (usage < bestUsage) {
+      const failures = BaseAudioClient._keyFailureCount.get(key) || 0;
+      const score = usage + failures;
+      if (score < bestScore) {
         bestKey = key;
-        bestUsage = usage;
+        bestScore = score;
       }
     }
     return bestKey;
@@ -143,6 +149,47 @@ class BaseAudioClient {
   _recordSuccess(apiKey) {
     const count = BaseAudioClient._keyUsageCount.get(apiKey) || 0;
     BaseAudioClient._keyUsageCount.set(apiKey, count + 1);
+  }
+
+  _recordFailure(apiKey) {
+    const count = BaseAudioClient._keyFailureCount.get(apiKey) || 0;
+    BaseAudioClient._keyFailureCount.set(apiKey, count + 1);
+  }
+
+  // Normalize raw model segments and strip degeneration artifacts:
+  // - non-positive duration (start >= end, e.g. the "start==end" repetition loop)
+  // - runs of the same title repeated back-to-back (the classic loop signature)
+  _sanitizeSegments(segments) {
+    if (!Array.isArray(segments)) return [];
+    const out = [];
+    let repeatedTitle = null;
+    let repeatCount = 0;
+    for (let i = 0; i < segments.length; i++) {
+      const s = segments[i] || {};
+      const start = Number(s.start) || 0;
+      const end = Number(s.end) || 0;
+      const title = (s.title || '').toString().trim();
+
+      if (!(end > start)) continue; // drop zero/negative-length entries
+
+      // Collapse a runaway loop: the same title repeated many times in a row is
+      // not real content — keep the first couple, then bail out of the run.
+      if (title && title === repeatedTitle) {
+        repeatCount++;
+        if (repeatCount >= 3) continue;
+      } else {
+        repeatedTitle = title;
+        repeatCount = 0;
+      }
+
+      out.push({
+        index: out.length + 1,
+        title: title || `Story ${out.length + 1}`,
+        start,
+        end,
+      });
+    }
+    return out;
   }
 
   _extractJsonArray(text) {
@@ -177,6 +224,24 @@ class BaseAudioClient {
         }
       } catch {
         // Continue to next match
+      }
+    }
+
+    // Strategy 1c: Salvage a TRUNCATED array — the model was cut off (finish_reason
+    // 'length') before emitting the closing ']'. Take from the first '[' up to the
+    // last complete object '}', then close the array and parse what we have.
+    const firstBracket = text.indexOf('[');
+    if (firstBracket !== -1 && text.indexOf(']', firstBracket) === -1) {
+      const lastBrace = text.lastIndexOf('}');
+      if (lastBrace > firstBracket) {
+        const candidate = text.slice(firstBracket, lastBrace + 1) + ']';
+        try {
+          const parsed = JSON.parse(candidate);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            console.log(`[${this.constructor.name}] Salvaged ${parsed.length} items from a truncated/unclosed array`);
+            return parsed;
+          }
+        } catch {}
       }
     }
 
@@ -394,18 +459,16 @@ class BaseAudioClient {
           }
 
           this._recordSuccess(apiKey);
-          console.log(`[${this.constructor.name}] Success with key ${masked}, found ${segments.length} stories`);
+          console.log(`[${this.constructor.name}] Success with key ${masked}, found ${segments.length} raw stories`);
 
-          return segments.map((s, i) => {
-            const st = Number(s.start) || 0;
-            const en = Number(s.end) || 0;
-            return {
-              index: s.index || i + 1,
-              title: s.title || `Story ${i + 1}`,
-              start: st,
-              end: en
-            };
-          }).filter(s => s.end > s.start);
+          const clean = this._sanitizeSegments(segments);
+          if (clean.length === 0) {
+            throw new Error(`${this.providerName} produced a degenerate/looping response with no usable stories (the model repeated itself). Try again or switch to the OpenRouter provider in Settings.`);
+          }
+          if (segments.length - clean.length > 0) {
+            console.log(`[${this.constructor.name}] Sanitized ${segments.length} raw → ${clean.length} valid stories (dropped degenerate/zero-length entries)`);
+          }
+          return clean;
         } catch (err) {
           lastError = err;
           console.error(`[${this.constructor.name}] Attempt ${attempt + 1} failed: ${err.message}`);
@@ -416,6 +479,10 @@ class BaseAudioClient {
             continue;
           }
 
+          // Non-rate-limit failure (bad key, 5xx, timeout, malformed response):
+          // penalize this key so _getAvailableKey rotates to a different one on
+          // the next attempt instead of retrying the same key.
+          this._recordFailure(apiKey);
           if (attempt < maxAttempts - 1) continue;
         }
       }

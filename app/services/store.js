@@ -19,6 +19,13 @@ async function getStore() {
         },
         default: []
       },
+      airforceApiKeys: {
+        type: 'array',
+        items: {
+          type: 'string'
+        },
+        default: []
+      },
       proxy: {
         type: ['object', 'null'],
         properties: {
@@ -48,6 +55,7 @@ async function getStore() {
         default: ['highlight']
       },
       subtitleCase: { type: 'string', default: 'sentence' },
+      subtitleOffsetMs: { type: 'number', default: 0 },
       groqApiKey: { type: 'string', default: '' },
       appLanguage: { type: 'string', default: 'en' },
       stats: {
@@ -71,6 +79,7 @@ async function getSettings() {
     apiProvider: store.get('apiProvider'),
     apiKeys: store.get('apiKeys'),
     nvidiaApiKeys: store.get('nvidiaApiKeys'),
+    airforceApiKeys: store.get('airforceApiKeys'),
     proxy: store.get('proxy'),
     subtitlesEnabled: store.get('subtitlesEnabled'),
     subtitleStyle: store.get('subtitleStyle'),
@@ -86,6 +95,7 @@ async function getSettings() {
     subtitleKaraokeMode: store.get('subtitleKaraokeMode'),
     subtitleKaraokeEffects: store.get('subtitleKaraokeEffects'),
     subtitleCase: store.get('subtitleCase'),
+    subtitleOffsetMs: store.get('subtitleOffsetMs'),
     groqApiKey: store.get('groqApiKey'),
     appLanguage: store.get('appLanguage')
   };
@@ -99,6 +109,9 @@ async function saveSettings(settings) {
   }
   if (settings.nvidiaApiKeys !== undefined) {
     store.set('nvidiaApiKeys', settings.nvidiaApiKeys);
+  }
+  if (settings.airforceApiKeys !== undefined) {
+    store.set('airforceApiKeys', settings.airforceApiKeys);
   }
   if (settings.proxy !== undefined) {
     store.set('proxy', settings.proxy);
@@ -122,6 +135,7 @@ async function saveSettings(settings) {
     store.set('subtitleKaraokeEffects', effects.length > 0 ? effects : ['highlight']);
   }
   if (settings.subtitleCase !== undefined) store.set('subtitleCase', settings.subtitleCase);
+  if (settings.subtitleOffsetMs !== undefined) store.set('subtitleOffsetMs', Number(settings.subtitleOffsetMs));
   if (settings.groqApiKey !== undefined) store.set('groqApiKey', settings.groqApiKey);
   if (settings.appLanguage !== undefined) store.set('appLanguage', settings.appLanguage);
 }
@@ -139,6 +153,11 @@ async function getApiKeys() {
 async function getNvidiaApiKeys() {
   const store = await getStore();
   return store.get('nvidiaApiKeys');
+}
+
+async function getAirforceApiKeys() {
+  const store = await getStore();
+  return store.get('airforceApiKeys');
 }
 
 async function getProxy() {
@@ -167,6 +186,7 @@ module.exports = {
   getApiProvider,
   getApiKeys,
   getNvidiaApiKeys,
+  getAirforceApiKeys,
   getProxy,
   getGroqApiKey,
   getStats,

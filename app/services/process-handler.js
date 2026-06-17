@@ -1,10 +1,11 @@
 const { ipcMain, BrowserWindow } = require('electron');
 const { OpenRouterClient } = require('./openrouter-client');
 const { NvidiaClient } = require('./nvidia-client');
+const { AirforceClient } = require('./airforce-client');
 const { MediaProcessor } = require('./media-processor');
 const { WhisperService } = require('./whisper-service');
 const { FontManager } = require('./font-manager');
-const { getApiProvider, getApiKeys, getNvidiaApiKeys, getProxy, getGroqApiKey } = require('./store');
+const { getApiProvider, getApiKeys, getNvidiaApiKeys, getAirforceApiKeys, getProxy, getGroqApiKey } = require('./store');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -59,6 +60,10 @@ function register() {
         apiKeys = (await getNvidiaApiKeys()) || [];
         providerName = 'NVIDIA NIM';
         client = new NvidiaClient(apiKeys, proxy);
+      } else if (apiProvider === 'airforce') {
+        apiKeys = (await getAirforceApiKeys()) || [];
+        providerName = 'api.airforce';
+        client = new AirforceClient(apiKeys, proxy);
       } else {
         apiKeys = (await getApiKeys()) || [];
         providerName = 'OpenRouter';
@@ -74,14 +79,14 @@ function register() {
 
       if (!segments?.length) return { success: false, error: 'No stories detected by AI' };
 
-      // Add 5-second buffer and clamp to real audio duration to avoid silent/out-of-range chunks.
+      // Clamp to real audio duration to avoid out-of-range chunks.
       const normalizedSegments = segments
         .map((seg) => ({
           ...seg,
-          start: Math.max(0, Number(seg.start || 0) - 5),
+          start: Math.max(0, Number(seg.start || 0)),
           end: Math.min(
-            Number.isFinite(sourceAudioDuration) && sourceAudioDuration > 0 ? sourceAudioDuration : Number(seg.end || 0) + 5,
-            Number(seg.end || 0) + 5
+            Number.isFinite(sourceAudioDuration) && sourceAudioDuration > 0 ? sourceAudioDuration : Number(seg.end || 0),
+            Number(seg.end || 0)
           )
         }))
         .filter((seg) => Number.isFinite(seg.start) && Number.isFinite(seg.end) && seg.end - seg.start >= 1.0);
@@ -101,43 +106,30 @@ function register() {
       // 4. Assemble each story
       const outputFiles = [];
       const base = 35;
-      // Combine short stories (< 120s / 2 min) with adjacent ones (use first story's title only)
-      const MAX_GAP_SEC = 30; // Don't merge segments that are more than 30s apart
-      const mergedSegments = [];
-      for (let i = 0; i < normalizedSegments.length; i++) {
-        let seg = { ...normalizedSegments[i] };
-
-        // Group stories if the current one is shorter than 2 minutes and the next one is close enough
-        while (i + 1 < normalizedSegments.length) {
-          const duration = seg.end - seg.start;
-          if (duration >= 120) break;
-          const nextSeg = normalizedSegments[i + 1];
-          const gap = Math.abs(nextSeg.start - seg.end);
-          if (gap > MAX_GAP_SEC) break; // Too far apart — don't merge
-          seg.end = nextSeg.end;
-          // Keep the FIRST story's title, do not concatenate
-          i++; // Skip the next segment since it's merged
-        }
-
-        mergedSegments.push(seg);
-      }
-
-      // Split long stories (> 5 min / 300s) into parts
+      
+      // Group and split stories to aim for 2-5 min (max 6 min) clips
       const chunks = [];
+      let i = 0;
+      while (i < normalizedSegments.length) {
+        let seg = { ...normalizedSegments[i] };
+        let start = seg.start;
+        let end = seg.end;
+        let duration = end - start;
+        // Apply 5‑second padding, clamped to audio bounds
+        start = Math.max(0, start - 5);
+        end = Math.min(sourceAudioDuration, end + 5);
+        duration = end - start;
 
-      for (let seg of mergedSegments) {
-        let duration = seg.end - seg.start;
-
-        if (duration > 300) {
-          // Story longer than 5 min — split into parts (~3 min each)
+        if (duration > 360) {
+          // Story longer than 6 min — split into parts (~3 min each)
           let numParts = Math.ceil(duration / 180);
           if (numParts > 5) numParts = 5; // Max 5 parts
 
           let partLength = (duration + (numParts - 1) * 5) / numParts;
-          let pStart = seg.start;
+          let pStart = start;
 
           for (let j = 0; j < numParts; j++) {
-            let pEnd = (j === numParts - 1) ? seg.end : pStart + partLength;
+            let pEnd = (j === numParts - 1) ? end : pStart + partLength;
             chunks.push({
               ...seg,
               start: pStart,
@@ -147,12 +139,54 @@ function register() {
             // 5 second overlap for next part
             pStart = pEnd - 5;
           }
-        } else {
-          // Story 2-5 min — keep as-is
-          chunks.push({
-            ...seg,
-            partIndex: null
-          });
+          i++;
+          continue;
+        }
+
+        // Story is <= 360s. Let's see if we can group it with subsequent stories
+        // to reach at least 120s, while staying under 300s (up to 360s max).
+        let j = i;
+        let currentEnd = end;
+        
+        while (j + 1 < normalizedSegments.length) {
+          let nextSeg = normalizedSegments[j + 1];
+          let potentialEnd = nextSeg.end;
+          let potentialDuration = potentialEnd - start;
+
+          if (potentialDuration <= 300) {
+            currentEnd = potentialEnd;
+            j++;
+          } else if (potentialDuration <= 360) {
+            currentEnd = potentialEnd;
+            j++;
+            break; // Stop grouping once we reach near the 6 min mark
+          } else {
+            break; // Exceeds limit, do not group next segment
+          }
+        }
+
+        chunks.push({
+          ...normalizedSegments[i], // Keep first story title
+          start: start,
+          end: currentEnd,
+          partIndex: null
+        });
+
+        i = j + 1; // Move past the grouped segments
+      }
+
+      // Post-processing: If the last chunk is too short (< 120s) and there is a previous chunk,
+      // and their combined duration is <= 360s, merge them by extending the previous chunk's end.
+      if (chunks.length > 1) {
+        const lastChunk = chunks[chunks.length - 1];
+        const lastDur = lastChunk.end - lastChunk.start;
+        if (lastDur < 120) {
+          const prevChunk = chunks[chunks.length - 2];
+          const combinedDur = lastChunk.end - prevChunk.start;
+          if (combinedDur <= 360) {
+            prevChunk.end = lastChunk.end;
+            chunks.pop();
+          }
         }
       }
 
@@ -166,6 +200,7 @@ function register() {
       const subtitleStyle    = config.subtitleStyle || 'Classic';
       const subtitleModel    = config.subtitleModel || 'whisper-large-v3';
       const subtitleLanguage = config.subtitleLanguage || 'ru';
+      const subtitleOffsetSec = Number(config.subtitleOffsetMs || 0) / 1000;
       const subtitleOptions  = {
         stylePreset:   subtitleStyle,
         position:      config.subtitlePosition    || 'bottom',
@@ -211,6 +246,7 @@ function register() {
         }
       }
 
+      const subtitleFailures = [];
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
         const pBase = base + (i * per);
@@ -257,7 +293,7 @@ function register() {
             const assContent = whisper.toASS(
               segments,
               subtitleStyle,
-              0,
+              subtitleOffsetSec,
               subtitleOptions,
               subtitleOptions.caseName || 'sentence'
             );
@@ -269,9 +305,13 @@ function register() {
 
             sp({ step: `Transcribing Story ${chunk.index}`, percent: 100, message: 'Subtitles ready' });
           } catch (whisperErr) {
-            const failMsg = `Subtitles failed for story ${chunk.index}: ${whisperErr.message}`;
+            // Subtitles are non-fatal: render this clip without them and keep going
+            // so a transient network drop on one story doesn't lose the whole batch.
+            subtitleFailures.push(chunk.index);
+            subtitlePath = null;
+            const failMsg = `Subtitles failed for story ${chunk.index} (${whisperErr.message}). Rendering this clip without subtitles.`;
+            console.warn(`[ShotShorts] ${failMsg}`);
             send({ step: `Story ${chunk.index}`, percent: 0, message: failMsg });
-            throw new Error(failMsg);
           }
         }
 
@@ -288,8 +328,12 @@ function register() {
       }
 
       // (audioPath will be cleaned up in finally block)
-      send({ step: 'Complete!', percent: 100, message: `Created ${outputFiles.length} video(s)` });
-      return { success: true, outputFiles };
+      let doneMsg = `Created ${outputFiles.length} video(s)`;
+      if (subtitleFailures.length > 0) {
+        doneMsg += ` — subtitles unavailable for story ${subtitleFailures.join(', ')} (network error)`;
+      }
+      send({ step: 'Complete!', percent: 100, message: doneMsg });
+      return { success: true, outputFiles, subtitleFailures };
 
     } catch (err) {
       const msg = err.message || 'Unknown error';

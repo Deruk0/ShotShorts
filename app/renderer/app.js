@@ -1,5 +1,5 @@
 // ===== STATE =====
-let settings = { apiProvider: 'openrouter', apiKeys: [], nvidiaApiKeys: [], proxy: null };
+let settings = { apiProvider: 'openrouter', apiKeys: [], nvidiaApiKeys: [], airforceApiKeys: [], proxy: null };
 let stats = { totalVideos: 0, totalRenderTimeMs: 0, lastRun: null };
 let sourcePath = null;
 let bgFolderPath = null;
@@ -45,7 +45,7 @@ const I18N = {
     tabs: { generator: '⚡ Generator', settings: '⚙ Settings' },
     status: { ready: 'Ready', processing: 'Processing…', done: 'Complete', error: 'Error', idle: 'Ready' },
     buttons: { generate: '⚡ Generate Videos ⚡', cancel: 'Cancel', add: 'Add', resetStats: 'Reset Statistics' },
-    warnings: { noKeys: 'Add at least one OpenRouter API key in Settings before generating.', noKeysNvidia: 'Add at least one NVIDIA NIM API key in Settings before generating.' },
+    warnings: { noKeys: 'Add at least one OpenRouter API key in Settings before generating.', noKeysNvidia: 'Add at least one NVIDIA NIM API key in Settings before generating.', noKeysAirforce: 'Add at least one api.airforce API key in Settings before generating.' },
     labels: {
       sourceTitle: 'Source Video (with stories)',
       bgTitle: 'Background Videos Folder',
@@ -58,11 +58,15 @@ const I18N = {
       apiProviderTitle: 'API Provider',
       providerOpenRouter: 'OpenRouter',
       providerNvidia: 'NVIDIA NIM',
+      providerAirforce: 'api.airforce',
       apiKeysTitle: 'OpenRouter API Keys',
       nvidiaKeysTitle: 'NVIDIA NIM API Keys',
+      airforceKeysTitle: 'api.airforce API Keys',
       keysHint: 'Add at least one OpenRouter API key to use the generator. Keys rotate automatically on rate-limit errors.',
       nvidiaKeysHint: 'Add at least one NVIDIA NIM API key to use the generator. Keys rotate automatically on rate-limit errors.',
+      airforceKeysHint: 'Add at least one api.airforce API key to use the generator. Keys rotate automatically on rate-limit errors.',
       nvidiaPlaceholder: 'nvapi-… paste NVIDIA NIM key here',
+      airforcePlaceholder: 'paste api.airforce key here',
       proxyTitle: 'Proxy Configuration',
       enable: 'Enable',
       proxyType: 'Type',
@@ -81,6 +85,8 @@ const I18N = {
       subFont: 'Font Size',
       subFontFamily: 'Font Family',
       subMargin: 'Vertical Margin',
+      subOffset: 'Subtitle Offset',
+      subOffsetHint: 'Positive values make subtitles appear earlier (fixes lag), negative values make them appear later.',
       subKaraoke: 'Karaoke Mode',
       subKaraokeWord: 'Word highlight',
       subKaraokeMode: 'Karaoke Effect',
@@ -102,7 +108,7 @@ const I18N = {
     tabs: { generator: '⚡ Генератор', settings: '⚙ Настройки' },
     status: { ready: 'Готово', processing: 'Обработка…', done: 'Завершено', error: 'Ошибка', idle: 'Готово' },
     buttons: { generate: '⚡ Создать видео ⚡', cancel: 'Отмена', add: 'Добавить', resetStats: 'Сбросить статистику' },
-    warnings: { noKeys: 'Добавь хотя бы один OpenRouter API ключ во вкладке настроек перед запуском.', noKeysNvidia: 'Добавь хотя бы один NVIDIA NIM API ключ во вкладке настроек перед запуском.' },
+    warnings: { noKeys: 'Добавь хотя бы один OpenRouter API ключ во вкладке настроек перед запуском.', noKeysNvidia: 'Добавь хотя бы один NVIDIA NIM API ключ во вкладке настроек перед запуском.', noKeysAirforce: 'Добавь хотя бы один api.airforce API ключ во вкладке настроек перед запуском.' },
     labels: {
       sourceTitle: 'Исходное видео (с историями)',
       bgTitle: 'Папка с фоновыми видео',
@@ -115,11 +121,15 @@ const I18N = {
       apiProviderTitle: 'Провайдер API',
       providerOpenRouter: 'OpenRouter',
       providerNvidia: 'NVIDIA NIM',
+      providerAirforce: 'api.airforce',
       apiKeysTitle: 'OpenRouter API ключи',
       nvidiaKeysTitle: 'NVIDIA NIM API ключи',
+      airforceKeysTitle: 'api.airforce API ключи',
       keysHint: 'Добавь хотя бы один OpenRouter API ключ для работы генератора. При лимитах ключи переключаются автоматически.',
       nvidiaKeysHint: 'Добавь хотя бы один NVIDIA NIM API ключ для работы генератора. При лимитах ключи переключаются автоматически.',
+      airforceKeysHint: 'Добавь хотя бы один api.airforce API ключ для работы генератора. При лимитах ключи переключаются автоматически.',
       nvidiaPlaceholder: 'nvapi-… вставь NVIDIA NIM ключ сюда',
+      airforcePlaceholder: 'вставь api.airforce ключ сюда',
       proxyTitle: 'Настройки прокси',
       enable: 'Включить',
       proxyType: 'Тип',
@@ -138,6 +148,8 @@ const I18N = {
       subFont: 'Размер шрифта',
       subFontFamily: 'Шрифт',
       subMargin: 'Вертикальный отступ',
+      subOffset: 'Смещение субтитров',
+      subOffsetHint: 'Положительные значения сдвигают субтитры назад (раньше), отрицательные — вперед (позже).',
       subKaraoke: 'Караоке режим',
       subKaraokeWord: 'Подсветка слов',
       subKaraokeMode: 'Эффект караоке',
@@ -183,13 +195,23 @@ function applyTranslations() {
   if (ap) {
     if (ap.options[0]) ap.options[0].text = t('labels.providerOpenRouter');
     if (ap.options[1]) ap.options[1].text = t('labels.providerNvidia');
+    if (ap.options[2]) ap.options[2].text = t('labels.providerAirforce');
   }
   const g = $('#txt-api-keys-title'); if (g) g.textContent = t('labels.apiKeysTitle');
   const nkt = $('#txt-nvidia-keys-title'); if (nkt) nkt.textContent = t('labels.nvidiaKeysTitle');
+  const akt = $('#txt-airforce-keys-title'); if (akt) akt.textContent = t('labels.airforceKeysTitle');
   const kh = $('#keys-hint'); if (kh) kh.textContent = t('labels.keysHint');
   const nkh = $('#nvidia-keys-hint'); if (nkh) nkh.textContent = t('labels.nvidiaKeysHint');
+  const akh = $('#airforce-keys-hint'); if (akh) akh.textContent = t('labels.airforceKeysHint');
+  const aki = $('#airforce-key-input'); if (aki) aki.placeholder = t('labels.airforcePlaceholder');
   const nkw = $('#no-keys-warning');
-  if (nkw) nkw.textContent = settings.apiProvider === 'nvidia' ? t('warnings.noKeysNvidia') : t('warnings.noKeys');
+  if (nkw) {
+    nkw.textContent = settings.apiProvider === 'nvidia'
+      ? t('warnings.noKeysNvidia')
+      : settings.apiProvider === 'airforce'
+        ? t('warnings.noKeysAirforce')
+        : t('warnings.noKeys');
+  }
   const pt = $('#txt-proxy-title'); if (pt) pt.textContent = t('labels.proxyTitle');
   const ep = $('#txt-enable-proxy'); if (ep) ep.textContent = t('labels.enable');
   const es = $('#txt-enable-subtitles'); if (es) es.textContent = t('labels.enable');
@@ -209,6 +231,8 @@ function applyTranslations() {
   const sf = $('#txt-sub-font'); if (sf) sf.textContent = t('labels.subFont');
   const sff = $('#txt-sub-font-family'); if (sff) sff.textContent = t('labels.subFontFamily');
   const svm = $('#txt-sub-margin'); if (svm) svm.textContent = t('labels.subMargin');
+  const sof = $('#txt-sub-offset'); if (sof) sof.textContent = t('labels.subOffset');
+  const sofh = $('#txt-sub-offset-hint'); if (sofh) sofh.textContent = t('labels.subOffsetHint');
   const sk = $('#txt-sub-karaoke'); if (sk) sk.textContent = t('labels.subKaraoke');
   const skw = $('#txt-sub-karaoke-word'); if (skw) skw.textContent = t('labels.subKaraokeWord');
   const skm = $('#txt-sub-karaoke-mode'); if (skm) skm.textContent = t('labels.subKaraokeMode');
@@ -234,6 +258,7 @@ async function loadSettings() {
       apiProvider: 'openrouter',
       apiKeys: [],
       nvidiaApiKeys: [],
+      airforceApiKeys: [],
       proxy: null,
       subtitlesEnabled: false,
       subtitleStyle: 'Classic',
@@ -245,6 +270,7 @@ async function loadSettings() {
       subtitleFontSize: 20,
       subtitleFontFamily: 'Inter',
       subtitleMarginV: 40,
+      subtitleOffsetMs: 0,
       subtitleKaraoke: false,
       subtitleKaraokeMode: 'highlight',
       subtitleKaraokeEffects: ['highlight'],
@@ -254,6 +280,7 @@ async function loadSettings() {
     };
     if (!settings.apiKeys) settings.apiKeys = [];
     if (!settings.nvidiaApiKeys) settings.nvidiaApiKeys = [];
+    if (!settings.airforceApiKeys) settings.airforceApiKeys = [];
     if (!settings.groqApiKey) settings.groqApiKey = '';
     // Legacy cleanup: remove old Gemini keys (starting with AIzaSy)
     settings.apiKeys = settings.apiKeys.filter(k => !k.startsWith('AIzaSy'));
@@ -264,6 +291,7 @@ async function loadSettings() {
       apiProvider: 'openrouter',
       apiKeys: [],
       nvidiaApiKeys: [],
+      airforceApiKeys: [],
       proxy: null,
       subtitlesEnabled: false,
       subtitleStyle: 'Classic',
@@ -275,6 +303,7 @@ async function loadSettings() {
       subtitleFontSize: 20,
       subtitleFontFamily: 'Inter',
       subtitleMarginV: 40,
+      subtitleOffsetMs: 0,
       subtitleKaraoke: false,
       subtitleKaraokeMode: 'highlight',
       subtitleKaraokeEffects: ['highlight']
@@ -360,9 +389,14 @@ function removeKey(index) {
   updateGenerateBtn();
 }
 
+function currentProviderKeys() {
+  if (settings.apiProvider === 'nvidia') return settings.nvidiaApiKeys;
+  if (settings.apiProvider === 'airforce') return settings.airforceApiKeys;
+  return settings.apiKeys;
+}
+
 function updateNoKeysWarning() {
-  const isNvidia = settings.apiProvider === 'nvidia';
-  const keysEmpty = isNvidia ? settings.nvidiaApiKeys.length === 0 : settings.apiKeys.length === 0;
+  const keysEmpty = currentProviderKeys().length === 0;
   $('#no-keys-warning').style.display = keysEmpty ? '' : 'none';
 }
 
@@ -435,6 +469,55 @@ function renderNvidiaKeys() {
   updateNoKeysWarning();
 }
 
+// ===== SETTINGS: API.AIRFORCE API KEYS =====
+$('#airforce-key-input').addEventListener('input', () => {
+  $('#btn-add-airforce-key').disabled = !$('#airforce-key-input').value.trim();
+});
+
+$('#airforce-key-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') addAirforceKey();
+});
+
+$('#btn-add-airforce-key').addEventListener('click', addAirforceKey);
+
+function addAirforceKey() {
+  const val = $('#airforce-key-input').value.trim();
+  if (!val || settings.airforceApiKeys.includes(val)) return;
+  settings.airforceApiKeys.push(val);
+  saveSettings();
+  $('#airforce-key-input').value = '';
+  $('#btn-add-airforce-key').disabled = true;
+  renderAirforceKeys();
+  updateGenerateBtn();
+}
+
+function removeAirforceKey(index) {
+  settings.airforceApiKeys.splice(index, 1);
+  saveSettings();
+  renderAirforceKeys();
+  updateGenerateBtn();
+}
+
+function renderAirforceKeys() {
+  const list = $('#airforce-key-list');
+  list.innerHTML = '';
+  settings.airforceApiKeys.forEach((key, i) => {
+    const tag = document.createElement('span');
+    tag.className = 'key-tag';
+    tag.textContent = `${key.slice(0,8)}…${key.slice(-4)} `;
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove';
+    removeBtn.title = 'Remove key';
+    removeBtn.textContent = '✕';
+    removeBtn.addEventListener('click', () => removeAirforceKey(i));
+    tag.appendChild(removeBtn);
+    list.appendChild(tag);
+  });
+  $('#airforce-keys-hint').style.display = settings.airforceApiKeys.length > 0 ? 'none' : '';
+  updateKeyCount();
+  updateNoKeysWarning();
+}
+
 // ===== SETTINGS: GROQ API KEY =====
 $('#groq-key-input').addEventListener('input', () => {
   $('#btn-add-groq-key').disabled = !$('#groq-key-input').value.trim();
@@ -498,9 +581,10 @@ $('#api-provider').addEventListener('change', () => {
 });
 
 function updateProviderUI() {
-  const isNvidia = settings.apiProvider === 'nvidia';
-  $('#keys-section-openrouter').style.display = isNvidia ? 'none' : '';
-  $('#keys-section-nvidia').style.display = isNvidia ? '' : 'none';
+  const provider = settings.apiProvider;
+  $('#keys-section-openrouter').style.display = provider === 'openrouter' ? '' : 'none';
+  $('#keys-section-nvidia').style.display = provider === 'nvidia' ? '' : 'none';
+  $('#keys-section-airforce').style.display = provider === 'airforce' ? '' : 'none';
   updateNoKeysWarning();
   updateKeyCount();
   updateGenerateBtn();
@@ -581,6 +665,7 @@ $('#subtitles-toggle').addEventListener('change', () => {
   settings.subtitleFontSize = Number($('#subtitle-font-size').value || 20);
   settings.subtitleFontFamily = $('#subtitle-font-family').value || 'Inter';
   settings.subtitleMarginV = Number($('#subtitle-margin-v').value || 40);
+  settings.subtitleOffsetMs = Number($('#subtitle-offset').value || 0);
   settings.subtitleKaraoke = !!$('#subtitle-karaoke').checked;
   settings.subtitleKaraokeEffects = getSelectedKaraokeEffects();
   settings.subtitleKaraokeMode = legacyModeFromEffects(settings.subtitleKaraokeEffects);
@@ -617,6 +702,12 @@ $('#subtitles-toggle').addEventListener('change', () => {
     updateSubtitlePreview();
   });
 });
+$('#subtitle-offset').addEventListener('input', () => {
+  const val = $('#subtitle-offset').value;
+  $('#subtitle-offset-value').textContent = val > 0 ? `+${val} ms` : `${val} ms`;
+  settings.subtitleOffsetMs = Number(val);
+  saveSettings();
+});
 $('#subtitle-karaoke').addEventListener('change', () => {
   settings.subtitleKaraoke = !!$('#subtitle-karaoke').checked;
   settings.subtitleKaraokeEffects = getSelectedKaraokeEffects();
@@ -641,14 +732,12 @@ $('#app-language').addEventListener('change', () => {
 
 
 function updateKeyCount() {
-  const count = settings.apiProvider === 'nvidia' ? settings.nvidiaApiKeys.length : settings.apiKeys.length;
+  const count = currentProviderKeys().length;
   $('#key-count').textContent = `${count} API key${count !== 1 ? 's' : ''} configured`;
 }
 
 function updateGenerateBtn() {
-  const keysOk = settings.apiProvider === 'nvidia'
-    ? settings.nvidiaApiKeys.length > 0
-    : settings.apiKeys.length > 0;
+  const keysOk = currentProviderKeys().length > 0;
   const canStart = sourcePath && bgFolderPath && outputFolderPath && keysOk && !isProcessing;
   $('#btn-generate').disabled = !canStart;
 }
@@ -690,6 +779,7 @@ async function startGeneration() {
       subtitleFontSize: Number(settings.subtitleFontSize || 20),
       subtitleFontFamily: settings.subtitleFontFamily || 'Inter',
       subtitleMarginV: Number(settings.subtitleMarginV || 40),
+      subtitleOffsetMs: Number(settings.subtitleOffsetMs || 0),
       subtitleKaraoke: !!settings.subtitleKaraoke,
       subtitleKaraokeMode: settings.subtitleKaraokeMode || 'highlight',
       subtitleKaraokeEffects: Array.isArray(settings.subtitleKaraokeEffects) ? settings.subtitleKaraokeEffects : ['highlight'],
@@ -749,6 +839,7 @@ function setControlsDisabled(disabled) {
     '#api-provider',
     '#key-input', '#btn-add-key',
     '#nvidia-key-input', '#btn-add-nvidia-key',
+    '#airforce-key-input', '#btn-add-airforce-key',
     '#proxy-toggle',
     '#proxy-type', '#proxy-host', '#proxy-port', '#proxy-user', '#proxy-pass',
     '#subtitles-toggle', '#subtitle-style', '#subtitle-model', '#subtitle-language',
@@ -991,9 +1082,13 @@ function updateSubtitlePreview() {
   }
 
   // Fit the 1080x1920 frame inside the stage by scaling it.
+  // Use min(width, height) ratio so the frame always fits inside the stage
+  // (the stage can be height-constrained by its own max-height or by the
+  // parent card max-height, which would otherwise clip the bottom text).
   if (frame) {
     const stageWidth = stage.clientWidth || 1;
-    const scale = stageWidth / 1080;
+    const stageHeight = stage.clientHeight || 1;
+    const scale = Math.min(stageWidth / 1080, stageHeight / 1920);
     frame.style.transform = `scale(${scale})`;
   }
 
@@ -1066,6 +1161,7 @@ async function init() {
   await loadStats();
   renderKeys();
   renderNvidiaKeys();
+  renderAirforceKeys();
   renderGroqKey();
   $('#api-provider').value = settings.apiProvider || 'openrouter';
   updateProviderUI();
@@ -1096,6 +1192,9 @@ async function init() {
   $('#subtitle-font-size').value = String(settings.subtitleFontSize);
   $('#subtitle-font-family').value = settings.subtitleFontFamily || 'Inter';
   $('#subtitle-margin-v').value = String(settings.subtitleMarginV);
+  const savedOffset = settings.subtitleOffsetMs || 0;
+  $('#subtitle-offset').value = String(savedOffset);
+  $('#subtitle-offset-value').textContent = savedOffset > 0 ? `+${savedOffset} ms` : `${savedOffset} ms`;
   $('#subtitle-karaoke').checked = !!settings.subtitleKaraoke;
   const savedEffects = Array.isArray(settings.subtitleKaraokeEffects)
     ? settings.subtitleKaraokeEffects
@@ -1119,7 +1218,9 @@ async function init() {
       const frame = document.getElementById('subtitle-preview-frame');
       if (!stage || !frame) return;
       const w = stage.clientWidth || 1;
-      frame.style.transform = `scale(${w / 1080})`;
+      const h = stage.clientHeight || 1;
+      const scale = Math.min(w / 1080, h / 1920);
+      frame.style.transform = `scale(${scale})`;
     });
   });
 }

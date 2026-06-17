@@ -99,6 +99,7 @@
           <select id="api-provider" class="strict-select">
             <option value="openrouter">OpenRouter</option>
             <option value="nvidia">NVIDIA NIM</option>
+            <option value="airforce">api.airforce</option>
           </select>
         </div>
       </div>
@@ -123,6 +124,16 @@
         </div>
         <div class="key-list" id="nvidia-key-list"></div>
         <p class="hint" id="nvidia-keys-hint">Add at least one NVIDIA NIM API key to use the generator. Keys rotate automatically on rate-limit errors.</p>
+      </div>
+
+      <div class="settings-section" id="keys-section-airforce" style="display:none">
+        <div class="section-title" id="txt-airforce-keys-title">api.airforce API Keys</div>
+        <div class="input-row">
+          <input type="password" id="airforce-key-input" placeholder="paste api.airforce key here" />
+          <button class="btn btn-primary" id="btn-add-airforce-key" disabled>Add</button>
+        </div>
+        <div class="key-list" id="airforce-key-list"></div>
+        <p class="hint" id="airforce-keys-hint">Add at least one api.airforce API key to use the generator. Keys rotate automatically on rate-limit errors.</p>
       </div>
 
       <div class="divider"></div>
@@ -238,7 +249,7 @@
             </div>
             <div class="field-group">
               <label class="field-label" id="txt-sub-margin">Vertical Margin</label>
-              <input type="number" id="subtitle-margin-v" min="10" max="300" value="40" />
+              <input type="number" id="subtitle-margin-v" min="10" max="900" value="40" />
             </div>
           </div>
 
@@ -260,6 +271,14 @@
               <label class="field-label" id="txt-sub-maxms">Max Line Duration (ms)</label>
               <input type="number" id="subtitle-max-line-ms" min="300" max="3000" step="100" value="1200" />
             </div>
+            <div class="field-group" style="grid-column: span 3; margin-top: 8px;">
+               <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                 <label class="field-label" id="txt-sub-offset" style="margin-bottom:0;">Subtitle Offset (ms)</label>
+                 <span id="subtitle-offset-value" style="font-size:12px; font-weight:bold; color:var(--accent, #ffc600);">0 ms</span>
+               </div>
+               <input type="range" id="subtitle-offset" class="app-slider" min="-1000" max="1000" step="50" value="0" style="width:100%;" />
+               <p class="hint" id="txt-sub-offset-hint" style="margin-top:4px; font-size:10px;">Positive values make subtitles appear earlier (fixes lag), negative values make them appear later.</p>
+             </div>
           </div>
 
           <p class="hint" style="margin-top:16px;margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">4. Караоке</p>

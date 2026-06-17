@@ -255,6 +255,48 @@ function groqRequest(apiKey, audioPath, model, language, proxy) {
   ).then(res => res.data);
 }
 
+// Transient network/server errors worth retrying (socket resets, timeouts,
+// DNS hiccups, and 5xx / 429 from the API).
+function isRetryableNetworkError(err) {
+  const code = err?.code || err?.cause?.code;
+  if (['ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED', 'EPIPE', 'EAI_AGAIN', 'ENOTFOUND', 'ENETUNREACH'].includes(code)) {
+    return true;
+  }
+  if (err?.message && /socket hang up|network|timeout/i.test(err.message)) {
+    return true;
+  }
+  const status = err?.response?.status;
+  if (status === 429 || (status >= 500 && status <= 599)) {
+    return true;
+  }
+  return false;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Wraps groqRequest with retry + exponential backoff for transient failures.
+// Each retry re-creates the request (and its file read stream) from scratch.
+async function groqRequestWithRetry(apiKey, audioPath, model, language, proxy, onProgress, maxRetries = 3) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await groqRequest(apiKey, audioPath, model, language, proxy);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxRetries && isRetryableNetworkError(err)) {
+        const delayMs = Math.min(2000 * Math.pow(2, attempt), 15000);
+        const code = err?.code || err?.response?.status || err?.message;
+        console.warn(`[Groq] Transcription attempt ${attempt + 1}/${maxRetries + 1} failed (${code}). Retrying in ${delayMs}ms…`);
+        onProgress?.(`Network issue (${code}). Retrying transcription (${attempt + 1}/${maxRetries})…`);
+        await sleep(delayMs);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
 // ---------------------------------------------------------------------------
 // WhisperService
 // ---------------------------------------------------------------------------
@@ -299,7 +341,7 @@ class WhisperService {
 
     onProgress?.(`Transcribing audio [${model}] via Groq…`);
 
-    const result = await groqRequest(apiKey, audioPath, model, language, proxy);
+    const result = await groqRequestWithRetry(apiKey, audioPath, model, language, proxy, onProgress);
 
     // Groq verbose_json response has segments with word-level timestamps
     const segments = [];
