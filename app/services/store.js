@@ -1,25 +1,29 @@
 let storeInstance = null;
 
+function normalizeGroqApiKeys(apiKeys, legacyKey = '') {
+  const merged = [];
+
+  if (Array.isArray(apiKeys)) {
+    merged.push(...apiKeys);
+  }
+  if (typeof legacyKey === 'string' && legacyKey.trim()) {
+    merged.push(legacyKey);
+  }
+
+  return [...new Set(
+    merged
+      .map((key) => String(key || '').trim())
+      .filter(Boolean)
+      .filter((key) => !key.startsWith('AIzaSy'))
+  )];
+}
+
 async function getStore() {
   if (!storeInstance) {
     const { default: Store } = await import('electron-store');
     const schema = {
-      apiProvider: { type: 'string', default: 'openrouter' },
+      apiProvider: { type: 'string', default: 'groq' },
       apiKeys: {
-        type: 'array',
-        items: {
-          type: 'string'
-        },
-        default: []
-      },
-      nvidiaApiKeys: {
-        type: 'array',
-        items: {
-          type: 'string'
-        },
-        default: []
-      },
-      airforceApiKeys: {
         type: 'array',
         items: {
           type: 'string'
@@ -58,6 +62,19 @@ async function getStore() {
       subtitleOffsetMs: { type: 'number', default: 0 },
       groqApiKey: { type: 'string', default: '' },
       appLanguage: { type: 'string', default: 'en' },
+      appTheme: { type: 'string', default: 'dark' },
+      activePresetId: {
+        type: ['string', 'null'],
+        default: null
+      },
+      presets: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: true
+        },
+        default: []
+      },
       stats: {
         type: 'object',
         properties: {
@@ -75,11 +92,11 @@ async function getStore() {
 
 async function getSettings() {
   const store = await getStore();
+  const apiKeys = normalizeGroqApiKeys(store.get('apiKeys'), store.get('groqApiKey'));
+
   return {
     apiProvider: store.get('apiProvider'),
-    apiKeys: store.get('apiKeys'),
-    nvidiaApiKeys: store.get('nvidiaApiKeys'),
-    airforceApiKeys: store.get('airforceApiKeys'),
+    apiKeys,
     proxy: store.get('proxy'),
     subtitlesEnabled: store.get('subtitlesEnabled'),
     subtitleStyle: store.get('subtitleStyle'),
@@ -96,23 +113,26 @@ async function getSettings() {
     subtitleKaraokeEffects: store.get('subtitleKaraokeEffects'),
     subtitleCase: store.get('subtitleCase'),
     subtitleOffsetMs: store.get('subtitleOffsetMs'),
-    groqApiKey: store.get('groqApiKey'),
-    appLanguage: store.get('appLanguage')
+    groqApiKey: apiKeys[0] || '',
+    appLanguage: store.get('appLanguage'),
+    appTheme: store.get('appTheme'),
+    activePresetId: store.get('activePresetId'),
+    presets: store.get('presets')
   };
 }
 
 async function saveSettings(settings) {
   const store = await getStore();
   if (settings.apiProvider !== undefined) store.set('apiProvider', settings.apiProvider);
-  if (settings.apiKeys !== undefined) {
-    store.set('apiKeys', settings.apiKeys);
+
+  if (settings.apiKeys !== undefined || settings.groqApiKey !== undefined) {
+    const normalizedKeys = settings.apiKeys !== undefined
+      ? normalizeGroqApiKeys(settings.apiKeys, settings.groqApiKey !== undefined ? settings.groqApiKey : '')
+      : normalizeGroqApiKeys([], settings.groqApiKey);
+    store.set('apiKeys', normalizedKeys);
+    store.set('groqApiKey', normalizedKeys[0] || '');
   }
-  if (settings.nvidiaApiKeys !== undefined) {
-    store.set('nvidiaApiKeys', settings.nvidiaApiKeys);
-  }
-  if (settings.airforceApiKeys !== undefined) {
-    store.set('airforceApiKeys', settings.airforceApiKeys);
-  }
+
   if (settings.proxy !== undefined) {
     store.set('proxy', settings.proxy);
   }
@@ -136,8 +156,13 @@ async function saveSettings(settings) {
   }
   if (settings.subtitleCase !== undefined) store.set('subtitleCase', settings.subtitleCase);
   if (settings.subtitleOffsetMs !== undefined) store.set('subtitleOffsetMs', Number(settings.subtitleOffsetMs));
-  if (settings.groqApiKey !== undefined) store.set('groqApiKey', settings.groqApiKey);
   if (settings.appLanguage !== undefined) store.set('appLanguage', settings.appLanguage);
+  if (settings.appTheme !== undefined) store.set('appTheme', settings.appTheme);
+  if (settings.activePresetId !== undefined) store.set('activePresetId', settings.activePresetId || null);
+  if (settings.presets !== undefined) {
+    const presets = Array.isArray(settings.presets) ? settings.presets : [];
+    store.set('presets', presets);
+  }
 }
 
 async function getApiProvider() {
@@ -147,17 +172,7 @@ async function getApiProvider() {
 
 async function getApiKeys() {
   const store = await getStore();
-  return store.get('apiKeys');
-}
-
-async function getNvidiaApiKeys() {
-  const store = await getStore();
-  return store.get('nvidiaApiKeys');
-}
-
-async function getAirforceApiKeys() {
-  const store = await getStore();
-  return store.get('airforceApiKeys');
+  return normalizeGroqApiKeys(store.get('apiKeys'), store.get('groqApiKey'));
 }
 
 async function getProxy() {
@@ -165,9 +180,8 @@ async function getProxy() {
   return store.get('proxy');
 }
 
-async function getGroqApiKey() {
-  const store = await getStore();
-  return store.get('groqApiKey');
+async function getGroqApiKeys() {
+  return getApiKeys();
 }
 
 async function getStats() {
@@ -185,10 +199,8 @@ module.exports = {
   saveSettings,
   getApiProvider,
   getApiKeys,
-  getNvidiaApiKeys,
-  getAirforceApiKeys,
   getProxy,
-  getGroqApiKey,
+  getGroqApiKeys,
   getStats,
   saveStats
 };

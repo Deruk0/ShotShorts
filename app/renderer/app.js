@@ -1,5 +1,5 @@
 // ===== STATE =====
-let settings = { apiProvider: 'openrouter', apiKeys: [], nvidiaApiKeys: [], airforceApiKeys: [], proxy: null };
+let settings = { apiProvider: 'groq', apiKeys: [], proxy: null, groqApiKey: '' };
 let stats = { totalVideos: 0, totalRenderTimeMs: 0, lastRun: null };
 let sourcePath = null;
 let bgFolderPath = null;
@@ -15,6 +15,19 @@ let uiLang = 'en';
 let subtitlePreviewInterval = null;
 let subtitlePreviewChunks = [];
 let subtitlePreviewChunkIndex = 0;
+
+function normalizeLocalGroqKeys(keys, legacyKey = '') {
+  const merged = [];
+  if (Array.isArray(keys)) merged.push(...keys);
+  if (typeof legacyKey === 'string' && legacyKey.trim()) merged.push(legacyKey);
+
+  return [...new Set(
+    merged
+      .map((key) => String(key || '').trim())
+      .filter(Boolean)
+      .filter((key) => !key.startsWith('AIzaSy'))
+  )];
+}
 
 function getSelectedKaraokeEffects() {
   const effects = [];
@@ -40,33 +53,163 @@ function legacyModeFromEffects(effects) {
   return 'highlight';
 }
 
+const DEFAULT_SETTINGS = {
+  apiProvider: 'groq',
+  apiKeys: [],
+  proxy: null,
+  subtitlesEnabled: false,
+  subtitleStyle: 'Classic',
+  subtitleModel: 'whisper-large-v3',
+  subtitleLanguage: 'ru',
+  subtitlePosition: 'bottom',
+  subtitleWordsPerLine: 3,
+  subtitleMaxLineMs: 1200,
+  subtitleFontSize: 20,
+  subtitleFontFamily: 'Inter',
+  subtitleMarginV: 40,
+  subtitleOffsetMs: 0,
+  subtitleKaraoke: false,
+  subtitleKaraokeMode: 'highlight',
+  subtitleKaraokeEffects: ['highlight'],
+  subtitleCase: 'sentence',
+  groqApiKey: '',
+  appLanguage: 'en',
+  appTheme: 'dark',
+  activePresetId: null,
+  presets: []
+};
+
+const PRESET_SETTING_KEYS = [
+  'apiProvider',
+  'apiKeys',
+  'proxy',
+  'subtitlesEnabled',
+  'subtitleStyle',
+  'subtitleModel',
+  'subtitleLanguage',
+  'subtitlePosition',
+  'subtitleWordsPerLine',
+  'subtitleMaxLineMs',
+  'subtitleFontSize',
+  'subtitleFontFamily',
+  'subtitleMarginV',
+  'subtitleOffsetMs',
+  'subtitleKaraoke',
+  'subtitleKaraokeMode',
+  'subtitleKaraokeEffects',
+  'subtitleCase',
+  'groqApiKey',
+  'appLanguage',
+  'appTheme'
+];
+
+const APP_THEMES = ['dark', 'light', 'milk', 'electric', 'sunset', 'lagoon', 'berry'];
+
+function normalizeTheme(theme) {
+  return APP_THEMES.includes(theme) ? theme : 'dark';
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = normalizeTheme(theme);
+}
+
+function clonePresetValue(value) {
+  if (Array.isArray(value)) return [...value];
+  if (value && typeof value === 'object') return { ...value };
+  return value;
+}
+
+function createPresetId() {
+  return `preset-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function normalizePresets(presets) {
+  if (!Array.isArray(presets)) return [];
+  return presets
+    .filter((preset) => preset && typeof preset === 'object')
+    .map((preset, index) => ({
+      id: String(preset.id || createPresetId()),
+      name: String(preset.name || `Preset ${index + 1}`),
+      settings: preset.settings && typeof preset.settings === 'object' ? preset.settings : {},
+      paths: preset.paths && typeof preset.paths === 'object' ? preset.paths : {},
+      createdAt: preset.createdAt || new Date().toISOString(),
+      updatedAt: preset.updatedAt || preset.createdAt || new Date().toISOString()
+    }));
+}
+
+function capturePresetSettings() {
+  const snapshot = {};
+  PRESET_SETTING_KEYS.forEach((key) => {
+    snapshot[key] = clonePresetValue(settings[key]);
+  });
+  snapshot.apiProvider = 'groq';
+  snapshot.apiKeys = normalizeLocalGroqKeys(snapshot.apiKeys, snapshot.groqApiKey);
+  snapshot.groqApiKey = snapshot.apiKeys[0] || '';
+  snapshot.subtitleKaraokeEffects = Array.isArray(snapshot.subtitleKaraokeEffects)
+    ? snapshot.subtitleKaraokeEffects.filter((effect) => typeof effect === 'string')
+    : ['highlight'];
+  if (snapshot.subtitleKaraokeEffects.length === 0) snapshot.subtitleKaraokeEffects = ['highlight'];
+  snapshot.subtitleKaraokeMode = legacyModeFromEffects(snapshot.subtitleKaraokeEffects);
+  return snapshot;
+}
+
+function capturePresetPaths() {
+  return {
+    sourcePath: sourcePath || null,
+    bgFolderPath: bgFolderPath || null,
+    outputFolderPath: outputFolderPath || null
+  };
+}
+
+function updateActivePresetSnapshot() {
+  if (!settings.activePresetId) return;
+  const presets = normalizePresets(settings.presets);
+  const index = presets.findIndex((preset) => preset.id === settings.activePresetId);
+  if (index === -1) {
+    settings.activePresetId = null;
+    settings.presets = presets;
+    return;
+  }
+  presets[index] = {
+    ...presets[index],
+    settings: capturePresetSettings(),
+    paths: capturePresetPaths(),
+    updatedAt: new Date().toISOString()
+  };
+  settings.presets = presets;
+}
+
 const I18N = {
   en: {
-    tabs: { generator: '⚡ Generator', settings: '⚙ Settings' },
+    tabs: { generator: 'Generator', settings: '⚙ Settings' },
     status: { ready: 'Ready', processing: 'Processing…', done: 'Complete', error: 'Error', idle: 'Ready' },
-    buttons: { generate: '⚡ Generate Videos ⚡', cancel: 'Cancel', add: 'Add', resetStats: 'Reset Statistics' },
-    warnings: { noKeys: 'Add at least one OpenRouter API key in Settings before generating.', noKeysNvidia: 'Add at least one NVIDIA NIM API key in Settings before generating.', noKeysAirforce: 'Add at least one api.airforce API key in Settings before generating.' },
+    buttons: { generate: 'Generate Videos', cancel: 'Cancel', add: 'Add', createPreset: 'Create', savePreset: 'Save Current', deletePreset: 'Delete Preset', resetStats: 'Reset Statistics' },
+    warnings: { noKeys: 'Add at least one Groq API key in Settings before generating.' },
     labels: {
-      sourceTitle: 'Source Video (with stories)',
+      sourceTitle: 'Source Audio / Video',
       bgTitle: 'Background Videos Folder',
       outputTitle: 'Output Folder',
-      sourcePlaceholder: 'Click to select the source video file…',
+      sourcePlaceholder: 'Click to select the source audio or video file…',
       bgPlaceholder: 'Click to select the ADHD background videos folder…',
       outputPlaceholder: 'Click to select where to save generated videos…',
       appLangTitle: 'App Language',
       interfaceLangLabel: 'Interface Language',
-      apiProviderTitle: 'API Provider',
-      providerOpenRouter: 'OpenRouter',
-      providerNvidia: 'NVIDIA NIM',
-      providerAirforce: 'api.airforce',
-      apiKeysTitle: 'OpenRouter API Keys',
-      nvidiaKeysTitle: 'NVIDIA NIM API Keys',
-      airforceKeysTitle: 'api.airforce API Keys',
-      keysHint: 'Add at least one OpenRouter API key to use the generator. Keys rotate automatically on rate-limit errors.',
-      nvidiaKeysHint: 'Add at least one NVIDIA NIM API key to use the generator. Keys rotate automatically on rate-limit errors.',
-      airforceKeysHint: 'Add at least one api.airforce API key to use the generator. Keys rotate automatically on rate-limit errors.',
-      nvidiaPlaceholder: 'nvapi-… paste NVIDIA NIM key here',
-      airforcePlaceholder: 'paste api.airforce key here',
+      themeLabel: 'Color Theme',
+      themeDark: 'Graphite',
+      themeLight: 'Paper',
+      themeMilk: 'Vanilla',
+      themeElectric: 'Electric Lime',
+      themeSunset: 'Sunset Pop',
+      themeLagoon: 'Lagoon',
+      themeBerry: 'Berry Punch',
+      presetsTitle: 'Presets',
+      presetSelectLabel: 'Active Preset',
+      presetNameLabel: 'New Preset Name',
+      noPreset: 'No preset selected',
+      presetNamePlaceholder: 'Preset name',
+      presetsHint: 'Create presets to save API keys, proxy, subtitle settings, language, and selected folders/files.',
+      apiKeysTitle: 'Groq API Keys',
+      keysHint: 'Add one or more Groq keys. Whisper and Qwen will automatically switch keys when one hits a limit.',
       proxyTitle: 'Proxy Configuration',
       enable: 'Enable',
       proxyType: 'Type',
@@ -74,7 +217,7 @@ const I18N = {
       proxyPort: 'Port',
       proxyUser: 'Username (optional)',
       proxyPass: 'Password (optional)',
-      subtitlesTitle: 'Subtitles (Whisper AI)',
+      subtitlesTitle: 'Transcript & Subtitles',
       subStyle: 'Style Preset',
       subModel: 'Model Quality',
       subLanguage: 'Language',
@@ -90,9 +233,7 @@ const I18N = {
       subKaraoke: 'Karaoke Mode',
       subKaraokeWord: 'Word highlight',
       subKaraokeMode: 'Karaoke Effect',
-      subHint: 'Transcription uses Groq Whisper API. Add your Groq API key above.',
-      groqKeyTitle: 'Groq API Key',
-      groqKeyHint: 'Required for subtitle transcription via Groq Whisper API.',
+      subHint: 'Whisper and Qwen both run through Groq. The transcript is generated once and then reused for subtitles and story analysis.',
       statsTitle: 'Statistics',
       statTotal: 'Total Videos',
       statTime: 'Total Render Time',
@@ -105,31 +246,35 @@ const I18N = {
     }
   },
   ru: {
-    tabs: { generator: '⚡ Генератор', settings: '⚙ Настройки' },
+    tabs: { generator: 'Генератор', settings: '⚙ Настройки' },
     status: { ready: 'Готово', processing: 'Обработка…', done: 'Завершено', error: 'Ошибка', idle: 'Готово' },
-    buttons: { generate: '⚡ Создать видео ⚡', cancel: 'Отмена', add: 'Добавить', resetStats: 'Сбросить статистику' },
-    warnings: { noKeys: 'Добавь хотя бы один OpenRouter API ключ во вкладке настроек перед запуском.', noKeysNvidia: 'Добавь хотя бы один NVIDIA NIM API ключ во вкладке настроек перед запуском.', noKeysAirforce: 'Добавь хотя бы один api.airforce API ключ во вкладке настроек перед запуском.' },
+    buttons: { generate: 'Создать видео', cancel: 'Отмена', add: 'Добавить', createPreset: 'Создать', savePreset: 'Сохранить текущие', deletePreset: 'Удалить пресет', resetStats: 'Сбросить статистику' },
+    warnings: { noKeys: 'Добавь хотя бы один Groq API ключ во вкладке настроек перед запуском.' },
     labels: {
-      sourceTitle: 'Исходное видео (с историями)',
+      sourceTitle: 'Исходное аудио / видео',
       bgTitle: 'Папка с фоновыми видео',
       outputTitle: 'Папка для вывода',
-      sourcePlaceholder: 'Нажми, чтобы выбрать исходный видеофайл…',
+      sourcePlaceholder: 'Нажми, чтобы выбрать исходный аудио- или видеофайл…',
       bgPlaceholder: 'Нажми, чтобы выбрать папку с ADHD-фонами…',
       outputPlaceholder: 'Нажми, чтобы выбрать папку сохранения…',
       appLangTitle: 'Язык приложения',
       interfaceLangLabel: 'Язык интерфейса',
-      apiProviderTitle: 'Провайдер API',
-      providerOpenRouter: 'OpenRouter',
-      providerNvidia: 'NVIDIA NIM',
-      providerAirforce: 'api.airforce',
-      apiKeysTitle: 'OpenRouter API ключи',
-      nvidiaKeysTitle: 'NVIDIA NIM API ключи',
-      airforceKeysTitle: 'api.airforce API ключи',
-      keysHint: 'Добавь хотя бы один OpenRouter API ключ для работы генератора. При лимитах ключи переключаются автоматически.',
-      nvidiaKeysHint: 'Добавь хотя бы один NVIDIA NIM API ключ для работы генератора. При лимитах ключи переключаются автоматически.',
-      airforceKeysHint: 'Добавь хотя бы один api.airforce API ключ для работы генератора. При лимитах ключи переключаются автоматически.',
-      nvidiaPlaceholder: 'nvapi-… вставь NVIDIA NIM ключ сюда',
-      airforcePlaceholder: 'вставь api.airforce ключ сюда',
+      themeLabel: 'Цветовая тема',
+      themeDark: 'Графит',
+      themeLight: 'Бумага',
+      themeMilk: 'Ваниль',
+      themeElectric: 'Электро-лайм',
+      themeSunset: 'Закатный поп',
+      themeLagoon: 'Лагуна',
+      themeBerry: 'Ягодный панч',
+      presetsTitle: 'Пресеты',
+      presetSelectLabel: 'Активный пресет',
+      presetNameLabel: 'Имя нового пресета',
+      noPreset: 'Пресет не выбран',
+      presetNamePlaceholder: 'Название пресета',
+      presetsHint: 'Создавай пресеты, чтобы сохранять API ключи, прокси, субтитры, язык и выбранные файлы/папки.',
+      apiKeysTitle: 'Groq API ключи',
+      keysHint: 'Добавь один или несколько Groq ключей. Whisper и Qwen будут автоматически переключаться между ними при лимитах.',
       proxyTitle: 'Настройки прокси',
       enable: 'Включить',
       proxyType: 'Тип',
@@ -137,7 +282,7 @@ const I18N = {
       proxyPort: 'Порт',
       proxyUser: 'Логин (необязательно)',
       proxyPass: 'Пароль (необязательно)',
-      subtitlesTitle: 'Субтитры (Whisper AI)',
+      subtitlesTitle: 'Расшифровка и субтитры',
       subStyle: 'Стиль',
       subModel: 'Качество модели',
       subLanguage: 'Язык',
@@ -153,9 +298,7 @@ const I18N = {
       subKaraoke: 'Караоке режим',
       subKaraokeWord: 'Подсветка слов',
       subKaraokeMode: 'Эффект караоке',
-      subHint: 'Транскрипция через Groq Whisper API. Добавь Groq API ключ выше.',
-      groqKeyTitle: 'Groq API ключ',
-      groqKeyHint: 'Нужен для транскрипции субтитров через Groq Whisper API.',
+      subHint: 'Whisper и Qwen работают через Groq. Расшифровка делается один раз и потом переиспользуется для субтитров и анализа.',
       statsTitle: 'Статистика',
       statTotal: 'Всего видео',
       statTime: 'Общее время рендера',
@@ -174,15 +317,26 @@ function t(path) {
   return path.split('.').reduce((acc, k) => (acc && acc[k] !== undefined ? acc[k] : null), langPack) ?? path;
 }
 
+function setLightningLabel(el, text, { bothSides = false } = {}) {
+  if (!el) return;
+  const safeText = String(text || '');
+  el.innerHTML = bothSides
+    ? `<span class="theme-bolt">ϟ</span> ${safeText} <span class="theme-bolt">ϟ</span>`
+    : `<span class="theme-bolt">ϟ</span> ${safeText}`;
+}
+
 function applyTranslations() {
   const tabs = $$('.nav-tab');
-  if (tabs[0]) tabs[0].textContent = t('tabs.generator');
+  if (tabs[0]) setLightningLabel(tabs[0], t('tabs.generator'));
   if (tabs[1]) tabs[1].textContent = t('tabs.settings');
   const st = $('#status-text');
   if (st && (!st.textContent || st.textContent === 'Ready' || st.textContent === 'Готово')) st.textContent = t('status.ready');
-  $('#btn-generate').textContent = t('buttons.generate');
+  setLightningLabel($('#btn-generate'), t('buttons.generate'), { bothSides: true });
   $('#btn-cancel').textContent = t('buttons.cancel');
   $('#btn-add-key').textContent = t('buttons.add');
+  $('#btn-create-preset').textContent = t('buttons.createPreset');
+  $('#btn-save-preset').textContent = t('buttons.savePreset');
+  $('#btn-delete-preset').textContent = t('buttons.deletePreset');
   $('#btn-reset-stats').textContent = t('buttons.resetStats');
   $('#no-keys-warning').textContent = t('warnings.noKeys');
   const sTitle = $('#txt-source-title'); if (sTitle) sTitle.textContent = t('labels.sourceTitle');
@@ -190,28 +344,31 @@ function applyTranslations() {
   const oTitle = $('#txt-output-title'); if (oTitle) oTitle.textContent = t('labels.outputTitle');
   const alTitle = $('#txt-app-lang-title'); if (alTitle) alTitle.textContent = t('labels.appLangTitle');
   const alLabel = $('#txt-interface-lang-label'); if (alLabel) alLabel.textContent = t('labels.interfaceLangLabel');
-  const apt = $('#txt-api-provider-title'); if (apt) apt.textContent = t('labels.apiProviderTitle');
-  const ap = $('#api-provider');
-  if (ap) {
-    if (ap.options[0]) ap.options[0].text = t('labels.providerOpenRouter');
-    if (ap.options[1]) ap.options[1].text = t('labels.providerNvidia');
-    if (ap.options[2]) ap.options[2].text = t('labels.providerAirforce');
+  const themeLabel = $('#txt-theme-label'); if (themeLabel) themeLabel.textContent = t('labels.themeLabel');
+  const themeSelect = $('#app-theme');
+  if (themeSelect) {
+    const themeNames = {
+      dark: t('labels.themeDark'),
+      light: t('labels.themeLight'),
+      milk: t('labels.themeMilk'),
+      electric: t('labels.themeElectric'),
+      sunset: t('labels.themeSunset'),
+      lagoon: t('labels.themeLagoon'),
+      berry: t('labels.themeBerry')
+    };
+    [...themeSelect.options].forEach((option) => {
+      option.textContent = themeNames[option.value] || option.textContent;
+    });
   }
+  const prTitle = $('#txt-presets-title'); if (prTitle) prTitle.textContent = t('labels.presetsTitle');
+  const prSelect = $('#txt-preset-select-label'); if (prSelect) prSelect.textContent = t('labels.presetSelectLabel');
+  const prName = $('#txt-preset-name-label'); if (prName) prName.textContent = t('labels.presetNameLabel');
+  const prInput = $('#preset-name-input'); if (prInput) prInput.placeholder = t('labels.presetNamePlaceholder');
+  const prHint = $('#presets-hint'); if (prHint) prHint.textContent = t('labels.presetsHint');
   const g = $('#txt-api-keys-title'); if (g) g.textContent = t('labels.apiKeysTitle');
-  const nkt = $('#txt-nvidia-keys-title'); if (nkt) nkt.textContent = t('labels.nvidiaKeysTitle');
-  const akt = $('#txt-airforce-keys-title'); if (akt) akt.textContent = t('labels.airforceKeysTitle');
   const kh = $('#keys-hint'); if (kh) kh.textContent = t('labels.keysHint');
-  const nkh = $('#nvidia-keys-hint'); if (nkh) nkh.textContent = t('labels.nvidiaKeysHint');
-  const akh = $('#airforce-keys-hint'); if (akh) akh.textContent = t('labels.airforceKeysHint');
-  const aki = $('#airforce-key-input'); if (aki) aki.placeholder = t('labels.airforcePlaceholder');
-  const nkw = $('#no-keys-warning');
-  if (nkw) {
-    nkw.textContent = settings.apiProvider === 'nvidia'
-      ? t('warnings.noKeysNvidia')
-      : settings.apiProvider === 'airforce'
-        ? t('warnings.noKeysAirforce')
-        : t('warnings.noKeys');
-  }
+  const ki = $('#key-input'); if (ki) ki.placeholder = currentProviderKeys().length > 0 ? 'gsk_… add another Groq API key' : 'gsk_… paste Groq API key here';
+  const nkw = $('#no-keys-warning'); if (nkw) nkw.textContent = t('warnings.noKeys');
   const pt = $('#txt-proxy-title'); if (pt) pt.textContent = t('labels.proxyTitle');
   const ep = $('#txt-enable-proxy'); if (ep) ep.textContent = t('labels.enable');
   const es = $('#txt-enable-subtitles'); if (es) es.textContent = t('labels.enable');
@@ -237,8 +394,6 @@ function applyTranslations() {
   const skw = $('#txt-sub-karaoke-word'); if (skw) skw.textContent = t('labels.subKaraokeWord');
   const skm = $('#txt-sub-karaoke-mode'); if (skm) skm.textContent = t('labels.subKaraokeMode');
   const sh = $('#txt-sub-hint'); if (sh) sh.textContent = t('labels.subHint');
-  const gkt = $('#txt-groq-key'); if (gkt) gkt.textContent = t('labels.groqKeyTitle');
-  const gkh = $('#groq-key-hint'); if (gkh) gkh.textContent = t('labels.groqKeyHint');
   const sTitle2 = $('#txt-stats-title'); if (sTitle2) sTitle2.textContent = t('labels.statsTitle');
   const st1 = $('#txt-stat-total'); if (st1) st1.textContent = t('labels.statTotal');
   const st2 = $('#txt-stat-time'); if (st2) st2.textContent = t('labels.statTime');
@@ -248,6 +403,8 @@ function applyTranslations() {
   if (!sourcePath) $('#source-label').textContent = t('labels.sourcePlaceholder');
   if (!bgFolderPath) $('#bg-label').textContent = t('labels.bgPlaceholder');
   if (!outputFolderPath) $('#output-label').textContent = t('labels.outputPlaceholder');
+  renderPresets();
+  updateKeyCount();
   updateSubtitlePreview();
 }
 
@@ -255,67 +412,30 @@ async function loadSettings() {
   try {
     settings = await window.api.getSettings() || { apiKeys: [], proxy: null };
     settings = {
-      apiProvider: 'openrouter',
-      apiKeys: [],
-      nvidiaApiKeys: [],
-      airforceApiKeys: [],
-      proxy: null,
-      subtitlesEnabled: false,
-      subtitleStyle: 'Classic',
-      subtitleModel: 'whisper-large-v3',
-      subtitleLanguage: 'ru',
-      subtitlePosition: 'bottom',
-      subtitleWordsPerLine: 3,
-      subtitleMaxLineMs: 1200,
-      subtitleFontSize: 20,
-      subtitleFontFamily: 'Inter',
-      subtitleMarginV: 40,
-      subtitleOffsetMs: 0,
-      subtitleKaraoke: false,
-      subtitleKaraokeMode: 'highlight',
-      subtitleKaraokeEffects: ['highlight'],
-      groqApiKey: '',
-      appLanguage: 'en',
+      ...DEFAULT_SETTINGS,
       ...settings
     };
-    if (!settings.apiKeys) settings.apiKeys = [];
-    if (!settings.nvidiaApiKeys) settings.nvidiaApiKeys = [];
-    if (!settings.airforceApiKeys) settings.airforceApiKeys = [];
-    if (!settings.groqApiKey) settings.groqApiKey = '';
-    // Legacy cleanup: remove old Gemini keys (starting with AIzaSy)
-    settings.apiKeys = settings.apiKeys.filter(k => !k.startsWith('AIzaSy'));
-    settings.nvidiaApiKeys = settings.nvidiaApiKeys.filter(k => !k.startsWith('AIzaSy'));
+    settings.apiProvider = 'groq';
+    settings.apiKeys = normalizeLocalGroqKeys(settings.apiKeys, settings.groqApiKey);
+    settings.groqApiKey = settings.apiKeys[0] || '';
+    settings.appTheme = normalizeTheme(settings.appTheme);
+    settings.presets = normalizePresets(settings.presets);
+    if (settings.activePresetId && !settings.presets.some((preset) => preset.id === settings.activePresetId)) {
+      settings.activePresetId = null;
+    }
   } catch (err) {
     console.error('Failed to load settings:', err);
-    settings = {
-      apiProvider: 'openrouter',
-      apiKeys: [],
-      nvidiaApiKeys: [],
-      airforceApiKeys: [],
-      proxy: null,
-      subtitlesEnabled: false,
-      subtitleStyle: 'Classic',
-      subtitleModel: 'whisper-large-v3',
-      subtitleLanguage: 'ru',
-      subtitlePosition: 'bottom',
-      subtitleWordsPerLine: 3,
-      subtitleMaxLineMs: 1200,
-      subtitleFontSize: 20,
-      subtitleFontFamily: 'Inter',
-      subtitleMarginV: 40,
-      subtitleOffsetMs: 0,
-      subtitleKaraoke: false,
-      subtitleKaraokeMode: 'highlight',
-      subtitleKaraokeEffects: ['highlight']
-      ,groqApiKey: ''
-      ,appLanguage: 'en'
-    };
+    settings = { ...DEFAULT_SETTINGS, presets: [] };
   }
 }
 
 async function saveSettings() {
   try {
+    settings.apiKeys = currentProviderKeys();
+    settings.groqApiKey = settings.apiKeys[0] || '';
+    updateActivePresetSnapshot();
     await window.api.saveSettings(settings);
+    renderPresets();
   } catch (err) {
     console.error('Failed to save settings:', err);
   }
@@ -324,6 +444,247 @@ async function saveSettings() {
 // ===== DOM REFS =====
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
+
+function syncSettingsFromControls() {
+  if ($('#proxy-toggle')) {
+    if ($('#proxy-toggle').checked) {
+      settings.proxy = {
+        type: $('#proxy-type').value,
+        host: $('#proxy-host').value,
+        port: $('#proxy-port').value,
+        username: $('#proxy-user').value,
+        password: $('#proxy-pass').value
+      };
+    } else {
+      settings.proxy = null;
+    }
+  }
+
+  if ($('#subtitles-toggle')) {
+    settings.subtitlesEnabled = !!$('#subtitles-toggle').checked;
+    settings.subtitleStyle = $('#subtitle-style').value;
+    settings.subtitleModel = $('#subtitle-model').value;
+    settings.subtitleLanguage = $('#subtitle-language').value;
+    settings.subtitlePosition = $('#subtitle-position').value;
+    settings.subtitleWordsPerLine = Number($('#subtitle-words-per-line').value || 3);
+    settings.subtitleMaxLineMs = Number($('#subtitle-max-line-ms').value || 1200);
+    settings.subtitleFontSize = Number($('#subtitle-font-size').value || 20);
+    settings.subtitleFontFamily = $('#subtitle-font-family').value || 'Inter';
+    settings.subtitleMarginV = Number($('#subtitle-margin-v').value || 40);
+    settings.subtitleOffsetMs = Number($('#subtitle-offset').value || 0);
+    settings.subtitleKaraoke = !!$('#subtitle-karaoke').checked;
+    settings.subtitleKaraokeEffects = getSelectedKaraokeEffects();
+    settings.subtitleKaraokeMode = legacyModeFromEffects(settings.subtitleKaraokeEffects);
+    settings.subtitleCase = $('#subtitle-case').value || 'sentence';
+  }
+
+  if ($('#app-language')) {
+    settings.appLanguage = $('#app-language').value;
+    uiLang = settings.appLanguage || 'en';
+  }
+  if ($('#app-theme')) {
+    settings.appTheme = normalizeTheme($('#app-theme').value);
+    applyTheme(settings.appTheme);
+  }
+  settings.apiProvider = 'groq';
+  settings.apiKeys = currentProviderKeys();
+  settings.groqApiKey = settings.apiKeys[0] || '';
+}
+
+function setPathLabel(label, path, placeholder) {
+  if (!label) return;
+  if (path) {
+    label.textContent = path;
+    label.className = 'path';
+  } else {
+    label.textContent = placeholder;
+    label.className = 'label';
+  }
+}
+
+function syncPathLabels() {
+  setPathLabel($('#source-label'), sourcePath, t('labels.sourcePlaceholder'));
+  setPathLabel($('#bg-label'), bgFolderPath, t('labels.bgPlaceholder'));
+  setPathLabel($('#output-label'), outputFolderPath, t('labels.outputPlaceholder'));
+}
+
+function syncSettingsToControls() {
+  settings = {
+    ...DEFAULT_SETTINGS,
+    ...settings,
+    presets: normalizePresets(settings.presets)
+  };
+  settings.apiProvider = 'groq';
+  settings.apiKeys = normalizeLocalGroqKeys(settings.apiKeys, settings.groqApiKey);
+  settings.groqApiKey = settings.apiKeys[0] || '';
+
+  $('#app-language').value = settings.appLanguage || 'en';
+  uiLang = settings.appLanguage || 'en';
+  settings.appTheme = normalizeTheme(settings.appTheme);
+  $('#app-theme').value = settings.appTheme;
+  applyTheme(settings.appTheme);
+
+  const hasProxy = !!settings.proxy;
+  $('#proxy-toggle').checked = hasProxy;
+  $('#proxy-fields').style.opacity = hasProxy ? '1' : '0.4';
+  $('#proxy-fields').style.pointerEvents = hasProxy ? 'auto' : 'none';
+  $('#proxy-type').value = settings.proxy?.type || 'http';
+  $('#proxy-host').value = settings.proxy?.host || '';
+  $('#proxy-port').value = settings.proxy?.port || '';
+  $('#proxy-user').value = settings.proxy?.username || '';
+  $('#proxy-pass').value = settings.proxy?.password || '';
+
+  $('#subtitles-toggle').checked = !!settings.subtitlesEnabled;
+  setSubtitleFieldsExpanded(!!settings.subtitlesEnabled);
+  $('#subtitle-style').value = settings.subtitleStyle || 'Classic';
+  $('#subtitle-model').value = settings.subtitleModel || 'whisper-large-v3';
+  $('#subtitle-language').value = settings.subtitleLanguage || 'ru';
+  $('#subtitle-position').value = settings.subtitlePosition || 'bottom';
+  $('#subtitle-words-per-line').value = String(settings.subtitleWordsPerLine || 3);
+  $('#subtitle-max-line-ms').value = String(settings.subtitleMaxLineMs || 1200);
+  $('#subtitle-font-size').value = String(settings.subtitleFontSize || 20);
+  $('#subtitle-font-family').value = settings.subtitleFontFamily || 'Inter';
+  $('#subtitle-margin-v').value = String(settings.subtitleMarginV || 40);
+  const savedOffset = Number(settings.subtitleOffsetMs || 0);
+  $('#subtitle-offset').value = String(savedOffset);
+  $('#subtitle-offset-value').textContent = savedOffset > 0 ? `+${savedOffset} ms` : `${savedOffset} ms`;
+  $('#subtitle-karaoke').checked = !!settings.subtitleKaraoke;
+  const savedEffects = Array.isArray(settings.subtitleKaraokeEffects)
+    ? settings.subtitleKaraokeEffects
+      : (settings.subtitleKaraokeMode === 'both'
+      ? ['highlight', 'box']
+      : settings.subtitleKaraokeMode === 'underline'
+        ? ['box']
+        : settings.subtitleKaraokeMode === 'caps'
+          ? ['caps']
+          : ['highlight']);
+  setSelectedKaraokeEffects(savedEffects);
+  $('#subtitle-case').value = settings.subtitleCase || 'sentence';
+
+  renderKeys();
+  renderPresets();
+  syncPathLabels();
+  updateGenerateBtn();
+  updateSubtitlePreview();
+}
+
+function renderPresets() {
+  const select = $('#preset-select');
+  if (!select) return;
+
+  const presets = normalizePresets(settings.presets);
+  settings.presets = presets;
+  select.innerHTML = '';
+
+  if (presets.length === 0) {
+    const emptyOption = document.createElement('option');
+    emptyOption.value = '';
+    emptyOption.textContent = t('labels.noPreset');
+    select.appendChild(emptyOption);
+  }
+
+  presets.forEach((preset) => {
+    const option = document.createElement('option');
+    option.value = preset.id;
+    option.textContent = preset.name;
+    select.appendChild(option);
+  });
+
+  if (settings.activePresetId && presets.some((preset) => preset.id === settings.activePresetId)) {
+    select.value = settings.activePresetId;
+  } else if (presets.length > 0) {
+    settings.activePresetId = presets[0].id;
+    select.value = settings.activePresetId;
+  } else {
+    settings.activePresetId = null;
+    select.value = '';
+  }
+
+  const hasActive = !!settings.activePresetId;
+  $('#btn-save-preset').disabled = !hasActive || isProcessing;
+  $('#btn-delete-preset').disabled = !hasActive || isProcessing;
+}
+
+async function createPreset() {
+  syncSettingsFromControls();
+  const input = $('#preset-name-input');
+  const name = input.value.trim();
+  if (!name) return;
+
+  const now = new Date().toISOString();
+  const preset = {
+    id: createPresetId(),
+    name,
+    settings: capturePresetSettings(),
+    paths: capturePresetPaths(),
+    createdAt: now,
+    updatedAt: now
+  };
+
+  settings.presets = [...normalizePresets(settings.presets), preset];
+  settings.activePresetId = preset.id;
+  input.value = '';
+  $('#btn-create-preset').disabled = true;
+  await saveSettings();
+  renderPresets();
+}
+
+async function saveCurrentPreset() {
+  if (!settings.activePresetId) return;
+  syncSettingsFromControls();
+  await saveSettings();
+  renderPresets();
+}
+
+async function applyPreset(id) {
+  if (!id) {
+    settings.activePresetId = null;
+    await saveSettings();
+    renderPresets();
+    return;
+  }
+
+  const presets = normalizePresets(settings.presets);
+  const preset = presets.find((item) => item.id === id);
+  if (!preset) return;
+
+  settings = {
+    ...settings,
+    ...DEFAULT_SETTINGS,
+    ...preset.settings,
+    presets,
+    activePresetId: preset.id
+  };
+  settings.apiKeys = normalizeLocalGroqKeys(settings.apiKeys, settings.groqApiKey);
+  settings.groqApiKey = settings.apiKeys[0] || '';
+
+  sourcePath = preset.paths?.sourcePath || null;
+  bgFolderPath = preset.paths?.bgFolderPath || null;
+  outputFolderPath = preset.paths?.outputFolderPath || null;
+
+  syncSettingsToControls();
+  applyTranslations();
+  await saveSettings();
+}
+
+async function deleteActivePreset() {
+  if (!settings.activePresetId) return;
+  const activePreset = normalizePresets(settings.presets).find((preset) => preset.id === settings.activePresetId);
+  const name = activePreset?.name || 'preset';
+  const message = uiLang === 'ru'
+    ? `Удалить пресет "${name}"?`
+    : `Delete preset "${name}"?`;
+  if (!window.confirm(message)) return;
+
+  settings.presets = normalizePresets(settings.presets).filter((preset) => preset.id !== settings.activePresetId);
+  settings.activePresetId = null;
+  if (settings.presets.length > 0) {
+    await applyPreset(settings.presets[0].id);
+    return;
+  }
+  await saveSettings();
+  renderPresets();
+}
 
 // ===== TABS =====
 $$('.nav-tab').forEach(tab => {
@@ -343,21 +704,41 @@ $('#btn-close').addEventListener('click', () => window.api.closeWindow());
 
 // ===== FILE PICKERS =====
 $('#pick-source').addEventListener('click', async () => {
-  const p = await window.api.openFile([{ name: 'Video Files', extensions: ['mp4','mkv','avi','mov','webm'] }]);
+  const p = await window.api.openFile([{ name: 'Audio / Video Files', extensions: ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'mp4', 'mkv', 'avi', 'mov', 'webm'] }]);
   if (p) { sourcePath = p; $('#source-label').textContent = p; $('#source-label').className = 'path'; }
+  if (p && settings.activePresetId) saveSettings();
   updateGenerateBtn();
 });
 
 $('#pick-background').addEventListener('click', async () => {
   const p = await window.api.openFolder();
   if (p) { bgFolderPath = p; $('#bg-label').textContent = p; $('#bg-label').className = 'path'; }
+  if (p && settings.activePresetId) saveSettings();
   updateGenerateBtn();
 });
 
 $('#pick-output').addEventListener('click', async () => {
   const p = await window.api.selectOutputFolder();
   if (p) { outputFolderPath = p; $('#output-label').textContent = p; $('#output-label').className = 'path'; }
+  if (p && settings.activePresetId) saveSettings();
   updateGenerateBtn();
+});
+
+// ===== SETTINGS: PRESETS =====
+$('#preset-name-input').addEventListener('input', () => {
+  $('#btn-create-preset').disabled = !$('#preset-name-input').value.trim() || isProcessing;
+});
+
+$('#preset-name-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !$('#btn-create-preset').disabled) createPreset();
+});
+
+$('#btn-create-preset').addEventListener('click', createPreset);
+$('#btn-save-preset').addEventListener('click', saveCurrentPreset);
+$('#btn-delete-preset').addEventListener('click', deleteActivePreset);
+
+$('#preset-select').addEventListener('change', () => {
+  applyPreset($('#preset-select').value);
 });
 
 // ===== SETTINGS: API KEYS =====
@@ -373,8 +754,9 @@ $('#btn-add-key').addEventListener('click', addKey);
 
 function addKey() {
   const val = $('#key-input').value.trim();
-  if (!val || settings.apiKeys.includes(val)) return;
-  settings.apiKeys.push(val);
+  if (!val) return;
+  settings.apiKeys = normalizeLocalGroqKeys([...currentProviderKeys(), val]);
+  settings.groqApiKey = settings.apiKeys[0] || '';
   saveSettings();
   $('#key-input').value = '';
   $('#btn-add-key').disabled = true;
@@ -383,16 +765,15 @@ function addKey() {
 }
 
 function removeKey(index) {
-  settings.apiKeys.splice(index, 1);
+  settings.apiKeys = currentProviderKeys().filter((_, keyIndex) => keyIndex !== index);
+  settings.groqApiKey = settings.apiKeys[0] || '';
   saveSettings();
   renderKeys();
   updateGenerateBtn();
 }
 
 function currentProviderKeys() {
-  if (settings.apiProvider === 'nvidia') return settings.nvidiaApiKeys;
-  if (settings.apiProvider === 'airforce') return settings.airforceApiKeys;
-  return settings.apiKeys;
+  return normalizeLocalGroqKeys(settings.apiKeys, settings.groqApiKey);
 }
 
 function updateNoKeysWarning() {
@@ -402,192 +783,25 @@ function updateNoKeysWarning() {
 
 function renderKeys() {
   const list = $('#key-list');
+  const keys = currentProviderKeys();
+  settings.apiKeys = keys;
+  settings.groqApiKey = keys[0] || '';
   list.innerHTML = '';
-  settings.apiKeys.forEach((key, i) => {
+  keys.forEach((key, index) => {
     const tag = document.createElement('span');
     tag.className = 'key-tag';
-    tag.textContent = `${key.slice(0,8)}…${key.slice(-4)} `;
+    tag.textContent = `${key.slice(0,6)}…${key.slice(-4)} `;
     const removeBtn = document.createElement('button');
     removeBtn.className = 'remove';
     removeBtn.title = 'Remove key';
     removeBtn.textContent = '✕';
-    removeBtn.addEventListener('click', () => removeKey(i));
+    removeBtn.addEventListener('click', () => removeKey(index));
     tag.appendChild(removeBtn);
     list.appendChild(tag);
   });
-  $('#keys-hint').style.display = settings.apiKeys.length > 0 ? 'none' : '';
+  $('#keys-hint').style.display = keys.length > 0 ? 'none' : '';
   updateKeyCount();
   updateNoKeysWarning();
-}
-
-// ===== SETTINGS: NVIDIA API KEYS =====
-$('#nvidia-key-input').addEventListener('input', () => {
-  $('#btn-add-nvidia-key').disabled = !$('#nvidia-key-input').value.trim();
-});
-
-$('#nvidia-key-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') addNvidiaKey();
-});
-
-$('#btn-add-nvidia-key').addEventListener('click', addNvidiaKey);
-
-function addNvidiaKey() {
-  const val = $('#nvidia-key-input').value.trim();
-  if (!val || settings.nvidiaApiKeys.includes(val)) return;
-  settings.nvidiaApiKeys.push(val);
-  saveSettings();
-  $('#nvidia-key-input').value = '';
-  $('#btn-add-nvidia-key').disabled = true;
-  renderNvidiaKeys();
-  updateGenerateBtn();
-}
-
-function removeNvidiaKey(index) {
-  settings.nvidiaApiKeys.splice(index, 1);
-  saveSettings();
-  renderNvidiaKeys();
-  updateGenerateBtn();
-}
-
-function renderNvidiaKeys() {
-  const list = $('#nvidia-key-list');
-  list.innerHTML = '';
-  settings.nvidiaApiKeys.forEach((key, i) => {
-    const tag = document.createElement('span');
-    tag.className = 'key-tag';
-    tag.textContent = `${key.slice(0,8)}…${key.slice(-4)} `;
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'remove';
-    removeBtn.title = 'Remove key';
-    removeBtn.textContent = '✕';
-    removeBtn.addEventListener('click', () => removeNvidiaKey(i));
-    tag.appendChild(removeBtn);
-    list.appendChild(tag);
-  });
-  $('#nvidia-keys-hint').style.display = settings.nvidiaApiKeys.length > 0 ? 'none' : '';
-  updateKeyCount();
-  updateNoKeysWarning();
-}
-
-// ===== SETTINGS: API.AIRFORCE API KEYS =====
-$('#airforce-key-input').addEventListener('input', () => {
-  $('#btn-add-airforce-key').disabled = !$('#airforce-key-input').value.trim();
-});
-
-$('#airforce-key-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') addAirforceKey();
-});
-
-$('#btn-add-airforce-key').addEventListener('click', addAirforceKey);
-
-function addAirforceKey() {
-  const val = $('#airforce-key-input').value.trim();
-  if (!val || settings.airforceApiKeys.includes(val)) return;
-  settings.airforceApiKeys.push(val);
-  saveSettings();
-  $('#airforce-key-input').value = '';
-  $('#btn-add-airforce-key').disabled = true;
-  renderAirforceKeys();
-  updateGenerateBtn();
-}
-
-function removeAirforceKey(index) {
-  settings.airforceApiKeys.splice(index, 1);
-  saveSettings();
-  renderAirforceKeys();
-  updateGenerateBtn();
-}
-
-function renderAirforceKeys() {
-  const list = $('#airforce-key-list');
-  list.innerHTML = '';
-  settings.airforceApiKeys.forEach((key, i) => {
-    const tag = document.createElement('span');
-    tag.className = 'key-tag';
-    tag.textContent = `${key.slice(0,8)}…${key.slice(-4)} `;
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'remove';
-    removeBtn.title = 'Remove key';
-    removeBtn.textContent = '✕';
-    removeBtn.addEventListener('click', () => removeAirforceKey(i));
-    tag.appendChild(removeBtn);
-    list.appendChild(tag);
-  });
-  $('#airforce-keys-hint').style.display = settings.airforceApiKeys.length > 0 ? 'none' : '';
-  updateKeyCount();
-  updateNoKeysWarning();
-}
-
-// ===== SETTINGS: GROQ API KEY =====
-$('#groq-key-input').addEventListener('input', () => {
-  $('#btn-add-groq-key').disabled = !$('#groq-key-input').value.trim();
-});
-
-$('#groq-key-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') addGroqKey();
-});
-
-$('#btn-add-groq-key').addEventListener('click', addGroqKey);
-
-function addGroqKey() {
-  const val = $('#groq-key-input').value.trim();
-  if (!val) return;
-  settings.groqApiKey = val;
-  saveSettings();
-  $('#groq-key-input').value = '';
-  $('#btn-add-groq-key').disabled = true;
-  renderGroqKey();
-}
-
-function removeGroqKey() {
-  settings.groqApiKey = '';
-  saveSettings();
-  renderGroqKey();
-}
-
-function renderGroqKey() {
-  const list = $('#groq-key-list');
-  const hint = $('#groq-key-hint');
-  const input = $('#groq-key-input');
-  list.innerHTML = '';
-
-  if (settings.groqApiKey) {
-    const key = settings.groqApiKey;
-    const tag = document.createElement('span');
-    tag.className = 'key-tag';
-    tag.textContent = `${key.slice(0, 6)}…${key.slice(-4)} `;
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'remove';
-    removeBtn.title = 'Remove key';
-    removeBtn.textContent = '✕';
-    removeBtn.addEventListener('click', removeGroqKey);
-    tag.appendChild(removeBtn);
-    list.appendChild(tag);
-    hint.style.display = 'none';
-    input.placeholder = 'gsk_… replace Groq API key';
-  } else {
-    hint.style.display = '';
-    hint.textContent = t('labels.groqKeyHint');
-    input.placeholder = 'gsk_… paste Groq API key here';
-  }
-}
-
-// ===== API PROVIDER SWITCH =====
-$('#api-provider').addEventListener('change', () => {
-  settings.apiProvider = $('#api-provider').value;
-  updateProviderUI();
-  saveSettings();
-  applyTranslations();
-});
-
-function updateProviderUI() {
-  const provider = settings.apiProvider;
-  $('#keys-section-openrouter').style.display = provider === 'openrouter' ? '' : 'none';
-  $('#keys-section-nvidia').style.display = provider === 'nvidia' ? '' : 'none';
-  $('#keys-section-airforce').style.display = provider === 'airforce' ? '' : 'none';
-  updateNoKeysWarning();
-  updateKeyCount();
-  updateGenerateBtn();
 }
 
 // ===== SETTINGS: PROXY =====
@@ -730,10 +944,18 @@ $('#app-language').addEventListener('change', () => {
   saveSettings();
 });
 
+$('#app-theme').addEventListener('change', () => {
+  settings.appTheme = normalizeTheme($('#app-theme').value);
+  applyTheme(settings.appTheme);
+  saveSettings();
+});
+
 
 function updateKeyCount() {
   const count = currentProviderKeys().length;
-  $('#key-count').textContent = `${count} API key${count !== 1 ? 's' : ''} configured`;
+  $('#key-count').textContent = count > 0
+    ? (uiLang === 'ru' ? `Groq ключей: ${count}` : `Groq keys: ${count}`)
+    : (uiLang === 'ru' ? 'Нужен Groq ключ' : 'Groq key required');
 }
 
 function updateGenerateBtn() {
@@ -836,14 +1058,13 @@ function cancelGeneration() {
 function setControlsDisabled(disabled) {
   const selectors = [
     '#pick-source', '#pick-background', '#pick-output',
-    '#api-provider',
+    '#app-language', '#app-theme',
+    '#preset-select', '#preset-name-input', '#btn-create-preset', '#btn-save-preset', '#btn-delete-preset',
     '#key-input', '#btn-add-key',
-    '#nvidia-key-input', '#btn-add-nvidia-key',
-    '#airforce-key-input', '#btn-add-airforce-key',
     '#proxy-toggle',
     '#proxy-type', '#proxy-host', '#proxy-port', '#proxy-user', '#proxy-pass',
     '#subtitles-toggle', '#subtitle-style', '#subtitle-model', '#subtitle-language',
-    '#subtitle-position', '#subtitle-words-per-line', '#subtitle-max-line-ms', '#subtitle-font-size', '#subtitle-font-family', '#subtitle-margin-v', '#subtitle-karaoke',
+    '#subtitle-position', '#subtitle-words-per-line', '#subtitle-max-line-ms', '#subtitle-font-size', '#subtitle-font-family', '#subtitle-margin-v', '#subtitle-offset', '#subtitle-case', '#subtitle-karaoke',
     '#karaoke-mode-highlight', '#karaoke-mode-box', '#karaoke-mode-caps',
     '#btn-reset-stats'
   ];
@@ -867,6 +1088,11 @@ function setControlsDisabled(disabled) {
     btn.style.pointerEvents = disabled ? 'none' : 'auto';
     btn.style.opacity = disabled ? '0.5' : '1';
   });
+
+  if (!disabled) {
+    $('#btn-create-preset').disabled = !$('#preset-name-input').value.trim();
+    renderPresets();
+  }
 }
 
 function setStatus(state, text) {
@@ -1007,7 +1233,7 @@ function updateSubtitlePreview() {
   if (!stage || !overlay || !text) return;
 
   const enabled = !!$('#subtitles-toggle')?.checked;
-  // Real ASS values (PlayRes 1080x1920). Preview uses these directly inside
+  // Real export values (1080x1920). Preview uses these directly inside
   // a 1080x1920 frame that is scaled down via CSS transform — so visual
   // proportions match the exported video exactly.
   const realFontSize = Math.max(12, Number($('#subtitle-font-size')?.value || 20));
@@ -1159,55 +1385,14 @@ $('#btn-reset-stats').addEventListener('click', resetStats);
 async function init() {
   await loadSettings();
   await loadStats();
-  renderKeys();
-  renderNvidiaKeys();
-  renderAirforceKeys();
-  renderGroqKey();
-  $('#api-provider').value = settings.apiProvider || 'openrouter';
-  updateProviderUI();
-  updateGenerateBtn();
-
-  if (settings.proxy) {
-    $('#proxy-toggle').checked = true;
-    $('#proxy-fields').style.opacity = '1';
-    $('#proxy-fields').style.pointerEvents = 'auto';
-    $('#proxy-type').value = settings.proxy.type || 'http';
-    $('#proxy-host').value = settings.proxy.host || '';
-    $('#proxy-port').value = settings.proxy.port || '';
-    $('#proxy-user').value = settings.proxy.username || '';
-    $('#proxy-pass').value = settings.proxy.password || '';
+  const activePreset = normalizePresets(settings.presets).find((preset) => preset.id === settings.activePresetId);
+  if (activePreset?.paths) {
+    sourcePath = activePreset.paths.sourcePath || null;
+    bgFolderPath = activePreset.paths.bgFolderPath || null;
+    outputFolderPath = activePreset.paths.outputFolderPath || null;
   }
-
-  $('#subtitles-toggle').checked = !!settings.subtitlesEnabled;
-  $('#app-language').value = settings.appLanguage || 'en';
-  uiLang = settings.appLanguage || 'en';
+  syncSettingsToControls();
   applyTranslations();
-  setSubtitleFieldsExpanded(!!settings.subtitlesEnabled);
-  $('#subtitle-style').value = settings.subtitleStyle;
-  $('#subtitle-model').value = settings.subtitleModel;
-  $('#subtitle-language').value = settings.subtitleLanguage;
-  $('#subtitle-position').value = settings.subtitlePosition;
-  $('#subtitle-words-per-line').value = String(settings.subtitleWordsPerLine);
-  $('#subtitle-max-line-ms').value = String(settings.subtitleMaxLineMs);
-  $('#subtitle-font-size').value = String(settings.subtitleFontSize);
-  $('#subtitle-font-family').value = settings.subtitleFontFamily || 'Inter';
-  $('#subtitle-margin-v').value = String(settings.subtitleMarginV);
-  const savedOffset = settings.subtitleOffsetMs || 0;
-  $('#subtitle-offset').value = String(savedOffset);
-  $('#subtitle-offset-value').textContent = savedOffset > 0 ? `+${savedOffset} ms` : `${savedOffset} ms`;
-  $('#subtitle-karaoke').checked = !!settings.subtitleKaraoke;
-  const savedEffects = Array.isArray(settings.subtitleKaraokeEffects)
-    ? settings.subtitleKaraokeEffects
-      : (settings.subtitleKaraokeMode === 'both'
-      ? ['highlight', 'box']
-      : settings.subtitleKaraokeMode === 'underline'
-        ? ['box']
-        : settings.subtitleKaraokeMode === 'caps'
-          ? ['caps']
-          : ['highlight']);
-  setSelectedKaraokeEffects(savedEffects);
-  $('#subtitle-case').value = settings.subtitleCase || 'sentence';
-  updateSubtitlePreview();
   // Recompute preview scale on window resize so the 1080x1920 frame keeps
   // fitting the available stage width.
   let __subPreviewResizeRaf = 0;

@@ -250,7 +250,7 @@ class MediaProcessor {
           if (isSubtitleVideo) {
             // Overlay pre-rendered subtitle video with alpha
             const subInputIndex = selected.length + 1;
-            filterStrings.push(`[vconcat][${subInputIndex}:v]overlay=0:0:shortest=1:format=auto[vout]`);
+            filterStrings.push(`[vconcat][${subInputIndex}:v]overlay=0:0:eof_action=pass:format=auto[vout]`);
             console.log(`[ShotShorts] Using video overlay for subtitles`);
           } else {
             const escaped = this._escapeSubtitlePathForFilter(subtitlePath);
@@ -326,7 +326,7 @@ class MediaProcessor {
           ];
           if (subtitlePath) {
             if (isSubtitleVideo) {
-              fallbackFilters.push(`[vscaled][1:v]overlay=0:0:shortest=1:format=auto[vout]`);
+              fallbackFilters.push(`[vscaled][1:v]overlay=0:0:eof_action=pass:format=auto[vout]`);
             } else {
               const escaped = this._escapeSubtitlePathForFilter(subtitlePath);
               const ext = path.extname(subtitlePath).toLowerCase();

@@ -25,7 +25,7 @@
   <!-- APP LAYOUT -->
   <div class="app-layout">
     <div class="nav-tabs">
-      <button class="nav-tab active" data-tab="generator">⚡ Generator</button>
+      <button class="nav-tab active" data-tab="generator"><span class="theme-bolt">ϟ</span> Generator</button>
       <button class="nav-tab" data-tab="settings">⚙ Settings</button>
     </div>
 
@@ -34,10 +34,10 @@
       <div class="generate-section">
 
         <div>
-          <div class="section-title" id="txt-source-title">Source Video (with stories)</div>
+          <div class="section-title" id="txt-source-title">Source Audio / Video</div>
           <div class="file-picker" id="pick-source">
             <div>
-              <span class="label" id="source-label">Click to select the source video file…</span>
+              <span class="label" id="source-label">Click to select the source audio or video file…</span>
             </div>
           </div>
         </div>
@@ -60,7 +60,7 @@
           </div>
         </div>
 
-        <p class="warning" id="no-keys-warning" style="display:none">Add at least one OpenRouter API key in Settings before generating.</p>
+        <p class="warning" id="no-keys-warning" style="display:none">Add your Groq API key in Settings before generating.</p>
 
         <div id="progress-container" class="progress-container" style="display:none">
           <div class="progress-step" id="progress-step"></div>
@@ -72,7 +72,7 @@
           <div class="progress-eta" id="progress-eta">--:--</div>
         </div>
 
-        <button class="btn btn-primary generate-btn" id="btn-generate" disabled>⚡ Generate Videos ⚡</button>
+        <button class="btn btn-primary generate-btn" id="btn-generate" disabled><span class="theme-bolt">ϟ</span> Generate Videos <span class="theme-bolt">ϟ</span></button>
         <button class="btn btn-danger generate-btn" id="btn-cancel" style="display:none">Cancel</button>
       </div>
     </div>
@@ -89,51 +89,56 @@
             <option value="ru">Русский</option>
           </select>
         </div>
-      </div>
-
-      <div class="divider"></div>
-
-      <div class="settings-section">
-        <div class="section-title" id="txt-api-provider-title">API Provider</div>
         <div class="field-group">
-          <select id="api-provider" class="strict-select">
-            <option value="openrouter">OpenRouter</option>
-            <option value="nvidia">NVIDIA NIM</option>
-            <option value="airforce">api.airforce</option>
+          <label class="field-label" id="txt-theme-label">Color Theme</label>
+          <select id="app-theme" class="strict-select">
+            <option value="dark" selected>Graphite</option>
+            <option value="light">Paper</option>
+            <option value="milk">Vanilla</option>
+            <option value="electric">Electric Lime</option>
+            <option value="sunset">Sunset Pop</option>
+            <option value="lagoon">Lagoon</option>
+            <option value="berry">Berry Punch</option>
           </select>
         </div>
       </div>
 
       <div class="divider"></div>
 
-      <div class="settings-section" id="keys-section-openrouter">
-        <div class="section-title" id="txt-api-keys-title">OpenRouter API Keys</div>
+      <div class="settings-section">
+        <div class="section-title" id="txt-presets-title">Presets</div>
+        <div class="preset-grid">
+          <div class="field-group">
+            <label class="field-label" id="txt-preset-select-label">Active Preset</label>
+            <select id="preset-select">
+              <option value="">No preset selected</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label class="field-label" id="txt-preset-name-label">New Preset Name</label>
+            <div class="input-row">
+              <input type="text" id="preset-name-input" placeholder="Preset name" />
+              <button class="btn btn-primary" id="btn-create-preset" disabled>Create</button>
+            </div>
+          </div>
+        </div>
+        <div class="preset-actions">
+          <button class="btn btn-secondary" id="btn-save-preset" disabled>Save Current</button>
+          <button class="btn btn-danger" id="btn-delete-preset" disabled>Delete Preset</button>
+        </div>
+        <p class="hint" id="presets-hint">Create presets to save API keys, proxy, subtitle settings, language, and selected folders/files.</p>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="settings-section" id="keys-section-groq">
+        <div class="section-title" id="txt-api-keys-title">Groq API Keys</div>
         <div class="input-row">
-          <input type="password" id="key-input" placeholder="sk-or-v1-… paste OpenRouter key here" />
+          <input type="password" id="key-input" placeholder="gsk_… paste Groq API key here" />
           <button class="btn btn-primary" id="btn-add-key" disabled>Add</button>
         </div>
         <div class="key-list" id="key-list"></div>
-        <p class="hint" id="keys-hint">Add at least one OpenRouter API key to use the generator. Keys rotate automatically on rate-limit errors.</p>
-      </div>
-
-      <div class="settings-section" id="keys-section-nvidia" style="display:none">
-        <div class="section-title" id="txt-nvidia-keys-title">NVIDIA NIM API Keys</div>
-        <div class="input-row">
-          <input type="password" id="nvidia-key-input" placeholder="nvapi-… paste NVIDIA NIM key here" />
-          <button class="btn btn-primary" id="btn-add-nvidia-key" disabled>Add</button>
-        </div>
-        <div class="key-list" id="nvidia-key-list"></div>
-        <p class="hint" id="nvidia-keys-hint">Add at least one NVIDIA NIM API key to use the generator. Keys rotate automatically on rate-limit errors.</p>
-      </div>
-
-      <div class="settings-section" id="keys-section-airforce" style="display:none">
-        <div class="section-title" id="txt-airforce-keys-title">api.airforce API Keys</div>
-        <div class="input-row">
-          <input type="password" id="airforce-key-input" placeholder="paste api.airforce key here" />
-          <button class="btn btn-primary" id="btn-add-airforce-key" disabled>Add</button>
-        </div>
-        <div class="key-list" id="airforce-key-list"></div>
-        <p class="hint" id="airforce-keys-hint">Add at least one api.airforce API key to use the generator. Keys rotate automatically on rate-limit errors.</p>
+        <p class="hint" id="keys-hint">Add one or more Groq keys. Whisper and Qwen will automatically switch keys when one hits a limit.</p>
       </div>
 
       <div class="divider"></div>
@@ -175,29 +180,17 @@
 
       <div class="settings-section">
         <div class="section-title" style="justify-content:space-between">
-          <span id="txt-subtitles-title">Subtitles (Whisper AI)</span>
+          <span id="txt-subtitles-title">Transcript &amp; Subtitles</span>
           <label class="toggle-label"><input type="checkbox" id="subtitles-toggle" /> <span id="txt-enable-subtitles">Enable</span></label>
         </div>
         <div id="subtitle-fields" style="opacity:0.4;pointer-events:none">
-
-          <p class="hint" style="margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">0. Groq API</p>
-          <div class="field-group">
-            <label class="field-label" id="txt-groq-key">Groq API Key</label>
-            <div class="input-row">
-              <input type="password" id="groq-key-input" placeholder="gsk_… paste Groq API key here" />
-              <button class="btn btn-primary" id="btn-add-groq-key" disabled>Add</button>
-            </div>
-            <div class="key-list" id="groq-key-list"></div>
-            <p class="hint" id="groq-key-hint">Required for subtitle transcription via Groq Whisper API.</p>
-          </div>
-
-          <p class="hint" style="margin-top:16px;margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">1. Распознавание</p>
+          <p class="hint" style="margin-top:0;margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">1. Распознавание</p>
           <div class="proxy-grid">
             <div class="field-group">
               <label class="field-label" id="txt-sub-model">Model Quality</label>
               <select id="subtitle-model" class="strict-select">
-                <option value="whisper-large-v3" selected>Whisper Large v3 — best quality</option>
-                <option value="whisper-large-v3-turbo">Whisper Large v3 Turbo — faster</option>
+                <option value="whisper-large-v3" selected>Whisper Large v3</option>
+                <option value="whisper-large-v3-turbo">Whisper Large v3 Turbo</option>
               </select>
             </div>
             <div class="field-group">
@@ -307,7 +300,7 @@
               </div>
             </div>
           </div>
-          <p class="hint" id="txt-sub-hint" style="margin-top:8px">Transcription uses Groq Whisper API. Add your Groq API key above.</p>
+          <p class="hint" id="txt-sub-hint" style="margin-top:8px">Whisper and Qwen both run through Groq. The transcript is generated once and then reused for subtitles and story analysis.</p>
         </div>
       </div>
 

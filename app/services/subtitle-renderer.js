@@ -56,6 +56,34 @@ function escapeHtml(text) {
     .replace(/"/g, '&quot;');
 }
 
+function applyCaseToText(text, caseName = 'sentence') {
+  const value = String(text || '');
+  if (caseName === 'uppercase') return value.toUpperCase();
+  if (caseName === 'lowercase') return value.toLowerCase();
+  if (!value) return value;
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function buildFallbackTimedWords(seg) {
+  const words = String(seg?.text || '')
+    .replace(/\r?\n/g, ' ')
+    .split(/\s+/)
+    .map((w) => w.trim())
+    .filter(Boolean);
+  if (!words.length) return [];
+
+  const start = Math.max(0, Number(seg?.start) || 0);
+  const rawEnd = Number(seg?.end);
+  const end = Number.isFinite(rawEnd) ? Math.max(start + 0.2, rawEnd) : start + 0.2;
+  const step = (end - start) / words.length;
+
+  return words.map((word, index) => ({
+    word,
+    start: start + step * index,
+    end: index === words.length - 1 ? end : start + step * (index + 1)
+  }));
+}
+
 class SubtitleRenderer {
   constructor() {
     this.fontManager = new FontManager();
@@ -129,9 +157,12 @@ class SubtitleRenderer {
     const karaoke = !!options.karaoke;
     const caseName = options.caseName || 'sentence';
     const wordsPerLine = Math.max(1, Number(options.wordsPerLine || 3));
+    const maxLineMs = Math.max(300, Number(options.maxLineMs || 1200));
+    const offsetSec = Number(options.offsetSec || 0);
+    const trackDuration = Math.max(0, Number(options.duration || 0));
 
-    // 2. Build unique frames with timing
-    const frames = [];
+    // 2. Build subtitle frames with timing on the local clip timeline.
+    const subtitleFrames = [];
     let frameIdx = 0;
     const totalSegments = segments.length;
 
@@ -141,38 +172,61 @@ class SubtitleRenderer {
       const segEnd = Number(seg.end) || (segStart + 1);
       const segDuration = Math.max(0.1, segEnd - segStart);
 
-      // Apply case
-      let segText = String(seg.text || '').trim();
-      if (caseName === 'uppercase') segText = segText.toUpperCase();
-      else if (caseName === 'lowercase') segText = segText.toLowerCase();
+      const segText = String(seg.text || '').replace(/\r?\n/g, ' ').trim();
 
       onProgress?.(`Rendering subtitle frames… ${si + 1}/${totalSegments}`);
 
-      if (karaoke && Array.isArray(seg.words) && seg.words.length > 0) {
-        const timedWords = seg.words.filter(w =>
+      let timedWords = Array.isArray(seg.words)
+        ? seg.words.filter(w =>
           Number.isFinite(Number(w?.start)) &&
           Number.isFinite(Number(w?.end)) &&
           Number(w.end) > Number(w.start)
-        );
+        )
+        : [];
 
-        if (timedWords.length === 0) {
-          const pngPath = path.join(TMP_DIR, `ss_sub_${Date.now()}_${frameIdx++}.png`);
-          const html = this._buildHTML(fontCSS, styleCSS, fontFamily, fontSize, position, marginV, segText, -1, options);
-          await this._renderFrame(html, pngPath, onProgress);
-          frames.push({ path: pngPath, start: segStart, end: segEnd });
-          continue;
-        }
+      if (karaoke && timedWords.length === 0) {
+        timedWords = buildFallbackTimedWords(seg);
+      }
 
-        for (let wi = 0; wi < timedWords.length; wi++) {
-          const w = timedWords[wi];
-          const wStart = Number(w.start);
-          const nextStart = wi < timedWords.length - 1 ? Number(timedWords[wi + 1].start) : segEnd;
-          const wEnd = Math.min(nextStart, Number(w.end) || nextStart);
+      if (timedWords.length > 0) {
+        let idx = 0;
+        while (idx < timedWords.length) {
+          const chunk = timedWords.slice(idx, idx + wordsPerLine);
+          const chunkWords = chunk.map(w => String(w.word || '').trim()).filter(Boolean);
+          if (!chunkWords.length) { idx += wordsPerLine; continue; }
 
-          const pngPath = path.join(TMP_DIR, `ss_sub_${Date.now()}_${frameIdx++}.png`);
-          const html = this._buildHTML(fontCSS, styleCSS, fontFamily, fontSize, position, marginV, segText, wi, options);
-          await this._renderFrame(html, pngPath, onProgress);
-          frames.push({ path: pngPath, start: wStart, end: wEnd });
+          const chunkStart = Number(chunk[0].start || segStart);
+          const rawChunkEnd = Number(chunk[chunk.length - 1].end || segEnd);
+          const chunkEnd = Math.min(rawChunkEnd, chunkStart + maxLineMs / 1000);
+
+          if (karaoke) {
+            for (let wi = 0; wi < chunk.length; wi++) {
+              const w = chunk[wi];
+              const wStart = Number(w.start || chunkStart);
+              const nextStart = wi < chunk.length - 1 ? Number(chunk[wi + 1].start || w.end || wStart) : Number(w.end || chunkEnd);
+              const wEnd = Math.min(chunkEnd, nextStart);
+
+              const pngPath = path.join(TMP_DIR, `ss_sub_${Date.now()}_${frameIdx++}.png`);
+              const html = this._buildHTML(fontCSS, styleCSS, fontFamily, fontSize, position, marginV, chunkWords, wi, options);
+              await this._renderFrame(html, pngPath, onProgress);
+              subtitleFrames.push({
+                path: pngPath,
+                start: Math.max(0, wStart - offsetSec),
+                end: Math.max(0, wEnd - offsetSec)
+              });
+            }
+          } else {
+            const pngPath = path.join(TMP_DIR, `ss_sub_${Date.now()}_${frameIdx++}.png`);
+            const html = this._buildHTML(fontCSS, styleCSS, fontFamily, fontSize, position, marginV, chunkWords, -1, options);
+            await this._renderFrame(html, pngPath, onProgress);
+            subtitleFrames.push({
+              path: pngPath,
+              start: Math.max(0, chunkStart - offsetSec),
+              end: Math.max(0, chunkEnd - offsetSec)
+            });
+          }
+
+          idx += wordsPerLine;
         }
       } else {
         // Non-karaoke: split into chunks by wordsPerLine
@@ -187,45 +241,95 @@ class SubtitleRenderer {
 
           const wordStart = segStart + (idx / totalWords) * segDuration;
           const wordEnd = Math.min(segStart + ((idx + wordsPerLine) / totalWords) * segDuration, segEnd);
+          const chunkEnd = Math.min(Math.max(wordStart + 0.2, wordStart + maxLineMs / 1000), wordEnd);
 
           const pngPath = path.join(TMP_DIR, `ss_sub_${Date.now()}_${frameIdx++}.png`);
           const html = this._buildHTML(fontCSS, styleCSS, fontFamily, fontSize, position, marginV, chunkText, -1, options);
           await this._renderFrame(html, pngPath, onProgress);
-          frames.push({ path: pngPath, start: wordStart, end: wordEnd });
+          subtitleFrames.push({
+            path: pngPath,
+            start: Math.max(0, wordStart - offsetSec),
+            end: Math.max(0, chunkEnd - offsetSec)
+          });
           idx += wordsPerLine;
         }
       }
     }
 
-    if (frames.length === 0) {
+    if (subtitleFrames.length === 0) {
       throw new Error('No subtitle frames were rendered');
+    }
+
+    const transparentPath = path.join(TMP_DIR, `ss_sub_transparent_${Date.now()}.png`);
+    await this._renderFrame(this._buildTransparentHTML(), transparentPath, onProgress);
+    const frames = this._buildTimelineFrames(subtitleFrames, transparentPath, trackDuration);
+    if (frames.length === 0) {
+      throw new Error('No subtitle frames remained after timing was applied');
     }
 
     // 3. Build concat list for ffmpeg
     const listPath = path.join(TMP_DIR, `ss_sub_list_${Date.now()}.txt`);
-    const listLines = [];
-    for (const frame of frames) {
-      const duration = Math.max(0.04, frame.end - frame.start);
-      listLines.push(`file '${frame.path.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`);
-      listLines.push(`duration ${duration.toFixed(3)}`);
-    }
-    const lastFrame = frames[frames.length - 1];
-    listLines.push(`file '${lastFrame.path.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`);
-    listLines.push('duration 0.04');
-    fs.writeFileSync(listPath, listLines.join('\n'), 'utf8');
-
-    // 4. Assemble frames into WebM with alpha
     const outputWebM = path.join(outputDir, `ss_subtitles_${Date.now()}.webm`);
-    onProgress?.('Assembling subtitle video…');
-    await this._ffmpegConcatToWebM(listPath, outputWebM);
 
-    // 5. Cleanup temp PNGs
-    for (const frame of frames) {
-      try { fs.unlinkSync(frame.path); } catch {}
+    try {
+      const listLines = [];
+      for (const frame of frames) {
+        const duration = Math.max(0.04, frame.end - frame.start);
+        listLines.push(`file '${frame.path.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`);
+        listLines.push(`duration ${duration.toFixed(3)}`);
+      }
+      const lastFrame = frames[frames.length - 1];
+      listLines.push(`file '${lastFrame.path.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`);
+      listLines.push('duration 0.04');
+      fs.writeFileSync(listPath, listLines.join('\n'), 'utf8');
+
+      // 4. Assemble frames into WebM with alpha
+      onProgress?.('Assembling subtitle video…');
+      await this._ffmpegConcatToWebM(listPath, outputWebM);
+      return outputWebM;
+    } finally {
+      // 5. Cleanup temp PNGs
+      for (const framePath of new Set(frames.map((frame) => frame.path))) {
+        try { fs.unlinkSync(framePath); } catch {}
+      }
+      try { fs.unlinkSync(listPath); } catch {}
     }
-    try { fs.unlinkSync(listPath); } catch {}
+  }
 
-    return outputWebM;
+  _buildTimelineFrames(subtitleFrames, transparentPath, duration) {
+    const sorted = subtitleFrames
+      .map((frame) => ({
+        ...frame,
+        start: Math.max(0, Number(frame.start) || 0),
+        end: Math.max(0, Number(frame.end) || 0)
+      }))
+      .filter((frame) => frame.end > frame.start)
+      .sort((a, b) => a.start - b.start || a.end - b.end);
+
+    const totalDuration = duration > 0
+      ? duration
+      : Math.max(...sorted.map((frame) => frame.end), 0.04);
+    const timeline = [];
+    let cursor = 0;
+
+    for (const frame of sorted) {
+      const start = Math.min(Math.max(frame.start, cursor), totalDuration);
+      const end = Math.min(Math.max(frame.end, start), totalDuration);
+      if (start > cursor + 0.001) {
+        timeline.push({ path: transparentPath, start: cursor, end: start });
+      }
+      if (end > start + 0.001) {
+        timeline.push({ path: frame.path, start, end });
+        cursor = end;
+      }
+      if (cursor >= totalDuration) break;
+    }
+
+    if (totalDuration > cursor + 0.001) {
+      timeline.push({ path: transparentPath, start: cursor, end: totalDuration });
+    }
+
+    return timeline;
   }
 
   _buildStyleCSS(options) {
@@ -268,29 +372,46 @@ class SubtitleRenderer {
       case 'Highlight':
         return `.subtitle-line { font-weight: 800; color: #ffe066; letter-spacing: 0.35px; text-shadow: -1px -1px 0 rgba(0,0,0,0.95), 1px -1px 0 rgba(0,0,0,0.95), -1px 1px 0 rgba(0,0,0,0.95), 1px 1px 0 rgba(0,0,0,0.95), 0 0 10px rgba(255,208,0,0.25); }
 ${karaokeWordCSS}
-.karaoke-word { color: #ffffff; }`;
+.subtitle-line .karaoke-word { color: #ffffff; }
+.subtitle-line .karaoke-word.mode-highlight { color: #ffe066; }`;
       case 'TikTokBold':
         return `.subtitle-line { font-weight: 900; letter-spacing: 0.3px; text-shadow: -2px -2px 0 rgba(0,0,0,0.98), 2px -2px 0 rgba(0,0,0,0.98), -2px 2px 0 rgba(0,0,0,0.98), 2px 2px 0 rgba(0,0,0,0.98), 0 4px 14px rgba(0,0,0,0.95); }${karaokeWordCSS}`;
       case 'HeavyShadow':
         return `.subtitle-line { font-weight: 900; letter-spacing: 0.35px; text-shadow: -2px -2px 0 rgba(0,0,0,0.98), 2px -2px 0 rgba(0,0,0,0.98), -2px 2px 0 rgba(0,0,0,0.98), 2px 2px 0 rgba(0,0,0,0.98), 0 4px 0 rgba(0,0,0,0.95), 0 8px 16px rgba(0,0,0,1); }${karaokeWordCSS}`;
       case 'SoftBox':
-        return `.subtitle-line { font-weight: 700; color: #f1f5f9; letter-spacing: 0.18px; background: rgba(0,0,0,0.48); border: 1px solid rgba(255,255,255,0.14); border-radius: 8px; padding: 8px 10px; text-shadow: 0 1px 2px rgba(0,0,0,0.95); max-width: 680px; }${karaokeWordCSS}`;
+        return `.subtitle-line { font-weight: 700; color: #f2f2f2; letter-spacing: 0.18px; background: rgba(0,0,0,0.52); border: 1px solid rgba(255,255,255,0.14); border-radius: 8px; padding: 8px 10px; text-shadow: 0 1px 2px rgba(0,0,0,0.95); }${karaokeWordCSS}`;
       default:
         return '';
     }
   }
 
   _buildHTML(fontCSS, styleCSS, fontFamily, fontSize, position, marginV, text, highlightIndex, options) {
-    const alignItems = position === 'top' ? 'flex-start' : position === 'middle' ? 'center' : 'flex-end';
-
-    let htmlText = escapeHtml(text);
+    const words = Array.isArray(text)
+      ? text.map((word) => String(word || '').trim()).filter(Boolean)
+      : String(text || '').split(/\s+/).filter(Boolean);
+    const caseName = options.caseName || 'sentence';
+    const casedText = applyCaseToText(words.join(' '), caseName);
+    const casedWords = casedText.split(/\s+/).filter(Boolean);
+    let htmlText = escapeHtml(casedText);
     if (highlightIndex >= 0 && options.karaoke) {
-      const words = text.split(/\s+/).filter(Boolean);
-      htmlText = words.map((w, i) => {
-        if (i === highlightIndex) return `<span class="karaoke-word">${escapeHtml(w)}</span>`;
+      const karaokeEffects = new Set(Array.isArray(options.karaokeEffects) ? options.karaokeEffects : []);
+      htmlText = casedWords.map((w, i) => {
+        if (i === highlightIndex) {
+          const classes = ['karaoke-word'];
+          if (karaokeEffects.has('highlight')) classes.push('mode-highlight');
+          if (karaokeEffects.has('box')) classes.push('mode-box');
+          const value = karaokeEffects.has('caps') && caseName !== 'uppercase' ? w.toUpperCase() : w;
+          return `<span class="${classes.join(' ')}">${escapeHtml(value)}</span>`;
+        }
         return escapeHtml(w);
       }).join(' ');
     }
+
+    const placement = position === 'top'
+      ? `top: ${marginV}px; bottom: auto;`
+      : position === 'middle'
+        ? 'top: 50%; bottom: auto; transform: translateY(-50%);'
+        : `bottom: ${marginV}px; top: auto;`;
 
     return `<!DOCTYPE html>
 <html>
@@ -298,24 +419,25 @@ ${karaokeWordCSS}
 <meta charset="UTF-8">
 <style>
 ${fontCSS}
+html,
 body {
   margin: 0;
   width: 1080px;
   height: 1920px;
   background: transparent;
-  display: flex;
-  align-items: ${alignItems};
-  justify-content: center;
-  padding: ${marginV}px 40px;
-  box-sizing: border-box;
+  overflow: hidden;
 }
 .subtitle-line {
+  position: absolute;
+  left: 40px;
+  right: 40px;
+  ${placement}
   font-family: '${fontFamily}', sans-serif;
   font-size: ${fontSize}px;
   color: #ffffff;
   text-align: center;
   line-height: 1.18;
-  max-width: 1000px;
+  box-sizing: border-box;
   word-break: break-word;
   white-space: normal;
 }
@@ -328,15 +450,33 @@ ${styleCSS}
 </html>`;
   }
 
+  _buildTransparentHTML() {
+    return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+html, body {
+  margin: 0;
+  width: 1080px;
+  height: 1920px;
+  background: transparent;
+  overflow: hidden;
+}
+</style>
+</head>
+<body></body>
+</html>`;
+  }
+
   async _renderFrame(html, outputPath, onProgress) {
     try {
       await this.page.setContent(html, { waitUntil: 'networkidle', timeout: 10000 });
       await this.page.evaluate(() => document.fonts.ready);
-      const element = await this.page.$('.subtitle-line');
-      if (!element) throw new Error('Subtitle element not found');
-      await element.screenshot({
+      await this.page.screenshot({
         path: outputPath,
         omitBackground: true,
+        fullPage: false,
       });
     } catch (err) {
       onProgress?.(`Subtitle render error: ${err.message}`);

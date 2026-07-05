@@ -1,5 +1,5 @@
 /**
- * WhisperService — transcription via Groq API (whisper-large-v3 / whisper-large-v3-turbo).
+ * WhisperService — transcription via Groq API (whisper-large-v3).
  *
  * Strategy:
  *  • Sends audio to Groq's Whisper endpoint — no local Python/PyTorch needed.
@@ -8,10 +8,13 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const axios = require('axios');
+const ffmpeg = require('fluent-ffmpeg');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { SocksProxyAgent } = require('socks-proxy-agent');
+const { normalizeGroqApiKeys, pickAvailableGroqKey, setGroqKeyCooldown } = require('./groq-key-utils');
 
 // ---------------------------------------------------------------------------
 // ASS style presets
@@ -104,9 +107,18 @@ const ASS_STYLES = {
 };
 
 const GROQ_MODELS = {
-  'whisper-large-v3': 'Whisper Large v3 — best quality',
-  'whisper-large-v3-turbo': 'Whisper Large v3 Turbo — faster, slightly less accurate'
+  'whisper-large-v3': 'Whisper Large v3',
+  'whisper-large-v3-turbo': 'Whisper Large v3 Turbo'
 };
+
+const MAX_DIRECT_UPLOAD_BYTES = 4 * 1024 * 1024;
+const MIN_CHUNK_DURATION_SEC = 60;
+const MAX_CHUNK_DURATION_SEC = 4 * 60;
+const MAX_RATE_LIMIT_RETRIES = 8;
+const DEFAULT_RATE_LIMIT_DELAY_MS = 30000;
+
+const groqTranscriptionKeyCooldowns = new Map();
+const groqTranscriptionKeyCursor = { current: 0 };
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -189,7 +201,7 @@ function buildAssKaraokeLine(words, activeIndex, karaokeEffects, styleName, case
 }
 
 // ---------------------------------------------------------------------------
-// Build proxy agent (same pattern as base-audio-client.js)
+// Build proxy agent for Groq requests
 // ---------------------------------------------------------------------------
 function buildProxyAgent(proxy) {
   if (!proxy || !proxy.host) return null;
@@ -214,11 +226,12 @@ function buildProxyAgent(proxy) {
 // ---------------------------------------------------------------------------
 // Groq API request helper
 // ---------------------------------------------------------------------------
-function groqRequest(apiKey, audioPath, model, language, proxy) {
+async function groqRequest(apiKey, audioPath, model, language, proxy) {
   const FormData = require('form-data');
   const form = new FormData();
   const ext = path.extname(audioPath).toLowerCase();
   const contentType = ext === '.mp3' ? 'audio/mpeg' : 'audio/wav';
+  const fileSize = fs.statSync(audioPath).size;
 
   form.append('file', fs.createReadStream(audioPath), {
     filename: path.basename(audioPath),
@@ -230,14 +243,23 @@ function groqRequest(apiKey, audioPath, model, language, proxy) {
   form.append('timestamp_granularities[]', 'segment');
   form.append('timestamp_granularities[]', 'word');
 
+  const contentLength = await new Promise((resolve, reject) => {
+    form.getLength((err, length) => {
+      if (err) return reject(err);
+      resolve(length);
+    });
+  });
+
   const config = {
     headers: {
       ...form.getHeaders(),
-      'Authorization': `Bearer ${apiKey}`
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Length': String(contentLength)
     },
     timeout: 300000,
     maxContentLength: Infinity,
-    maxBodyLength: Infinity
+    maxBodyLength: Infinity,
+    validateStatus: () => true
   };
 
   const agent = buildProxyAgent(proxy);
@@ -248,11 +270,23 @@ function groqRequest(apiKey, audioPath, model, language, proxy) {
     console.log(`[Groq] No proxy configured, going direct. Proxy data:`, JSON.stringify(proxy));
   }
 
-  return axios.post(
+  const response = await axios.post(
     'https://api.groq.com/openai/v1/audio/transcriptions',
     form,
     config
-  ).then(res => res.data);
+  );
+
+  if (response.status >= 200 && response.status < 300) {
+    return response.data;
+  }
+
+  const serverHint = response.headers?.server || response.headers?.via || 'unknown';
+  const bodyText = typeof response.data === 'string'
+    ? response.data
+    : JSON.stringify(response.data || {});
+  const err = new Error(`Groq transcription failed with status ${response.status}. Upload bytes=${contentLength}, audio bytes=${fileSize}, server=${serverHint}, body=${bodyText.slice(0, 400)}`);
+  err.response = response;
+  throw err;
 }
 
 // Transient network/server errors worth retrying (socket resets, timeouts,
@@ -272,28 +306,133 @@ function isRetryableNetworkError(err) {
   return false;
 }
 
+function isPayloadTooLargeError(err) {
+  return err?.response?.status === 413;
+}
+
+function isRateLimitError(err) {
+  return err?.response?.status === 429;
+}
+
+function parseDurationMs(value) {
+  if (value === undefined || value === null) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric)) {
+    return Math.max(0, Math.ceil(numeric * 1000));
+  }
+
+  const asDate = Date.parse(raw);
+  if (Number.isFinite(asDate)) {
+    return Math.max(0, asDate - Date.now());
+  }
+
+  let totalMs = 0;
+  const unitPattern = /(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds|ms|millisecond|milliseconds)\b/gi;
+  for (const match of raw.matchAll(unitPattern)) {
+    const amount = Number(match[1]);
+    const unit = match[2].toLowerCase();
+    if (!Number.isFinite(amount)) continue;
+    if (unit.startsWith('h')) totalMs += amount * 60 * 60 * 1000;
+    else if (unit === 'm' || unit.startsWith('min')) totalMs += amount * 60 * 1000;
+    else if (unit === 'ms' || unit.startsWith('milli')) totalMs += amount;
+    else totalMs += amount * 1000;
+  }
+
+  return totalMs > 0 ? Math.ceil(totalMs) : null;
+}
+
+function getErrorText(err) {
+  const data = err?.response?.data;
+  if (!data) return err?.message || '';
+  if (typeof data === 'string') return data;
+  try {
+    return JSON.stringify(data);
+  } catch {
+    return String(data);
+  }
+}
+
+function getRateLimitDelayMs(err, fallbackMs = DEFAULT_RATE_LIMIT_DELAY_MS) {
+  const headers = err?.response?.headers || {};
+  const retryAfter = headers['retry-after'] || headers['Retry-After'];
+  const headerDelay = parseDurationMs(retryAfter);
+  if (headerDelay !== null) return headerDelay;
+
+  const resetAfter = headers['x-ratelimit-reset-after'] || headers['x-ratelimit-reset'] || headers['X-RateLimit-Reset'];
+  const resetDelay = parseDurationMs(resetAfter);
+  if (resetDelay !== null) return resetDelay;
+
+  const text = getErrorText(err);
+  const inMatch = text.match(/(?:try again|retry|available|reset)[^0-9]{0,40}(?:in|after)?\s*((?:\d+(?:\.\d+)?\s*(?:h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds|ms|millisecond|milliseconds)\s*)+)/i);
+  const textDelay = inMatch ? parseDurationMs(inMatch[1]) : null;
+  if (textDelay !== null) return textDelay;
+
+  return fallbackMs;
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitForGroqTranscriptionKey(apiKeys, onProgress) {
+  const normalizedKeys = normalizeGroqApiKeys(apiKeys);
+  if (!normalizedKeys.length) {
+    throw new Error('Groq API keys not set. Add at least one in Settings.');
+  }
+
+  while (true) {
+    const selected = pickAvailableGroqKey(normalizedKeys, groqTranscriptionKeyCooldowns, groqTranscriptionKeyCursor);
+    if (selected.apiKey) {
+      return selected;
+    }
+
+    const waitMs = Math.max(1000, selected.waitMs || DEFAULT_RATE_LIMIT_DELAY_MS);
+    onProgress?.(`All Groq Whisper keys are cooling down. Waiting ${Math.ceil(waitMs / 1000)}s…`);
+    await sleep(waitMs);
+  }
+}
 
 // Wraps groqRequest with retry + exponential backoff for transient failures.
 // Each retry re-creates the request (and its file read stream) from scratch.
-async function groqRequestWithRetry(apiKey, audioPath, model, language, proxy, onProgress, maxRetries = 3) {
+async function groqRequestWithRetry(apiKeys, audioPath, model, language, proxy, onProgress, maxRetries = 3) {
   let lastErr = null;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  let rateLimitRetries = 0;
+  let transientRetries = 0;
+
+  while (true) {
+    const selectedKey = await waitForGroqTranscriptionKey(apiKeys, onProgress);
+
     try {
-      return await groqRequest(apiKey, audioPath, model, language, proxy);
+      return await groqRequest(selectedKey.apiKey, audioPath, model, language, proxy);
     } catch (err) {
       lastErr = err;
-      if (attempt < maxRetries && isRetryableNetworkError(err)) {
-        const delayMs = Math.min(2000 * Math.pow(2, attempt), 15000);
+
+      if (isRateLimitError(err)) {
+        if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
+          throw err;
+        }
+        const delayMs = Math.min(getRateLimitDelayMs(err, DEFAULT_RATE_LIMIT_DELAY_MS), 10 * 60 * 1000);
+        setGroqKeyCooldown(groqTranscriptionKeyCooldowns, selectedKey.apiKey, delayMs);
+        rateLimitRetries++;
+        onProgress?.(`Groq Whisper key ${selectedKey.index + 1}/${selectedKey.total} hit rate limit. Cooling down for ${Math.ceil(delayMs / 1000)}s and trying another key…`);
+        continue;
+      }
+
+      if (transientRetries < maxRetries && isRetryableNetworkError(err)) {
+        const delayMs = Math.min(2000 * Math.pow(2, transientRetries), 15000);
         const code = err?.code || err?.response?.status || err?.message;
-        console.warn(`[Groq] Transcription attempt ${attempt + 1}/${maxRetries + 1} failed (${code}). Retrying in ${delayMs}ms…`);
-        onProgress?.(`Network issue (${code}). Retrying transcription (${attempt + 1}/${maxRetries})…`);
+        transientRetries++;
+        console.warn(`[Groq] Transcription attempt ${transientRetries}/${maxRetries + 1} failed (${code}). Retrying in ${delayMs}ms…`);
+        onProgress?.(`Network issue (${code}). Retrying Whisper request in ${Math.ceil(delayMs / 1000)}s…`);
         await sleep(delayMs);
         continue;
       }
+
       throw err;
     }
   }
+
   throw lastErr;
 }
 
@@ -302,16 +441,20 @@ async function groqRequestWithRetry(apiKey, audioPath, model, language, proxy, o
 // ---------------------------------------------------------------------------
 class WhisperService {
   constructor() {
-    this.apiKey = null;
+    this.apiKeys = [];
     this.proxy = null;
   }
 
   /**
-   * Set the Groq API key.
-   * @param {string} key  Groq API key (gsk_...)
+   * Set Groq API keys.
+   * @param {string[]|string} keys  One or more Groq API keys (gsk_...)
    */
+  setApiKeys(keys) {
+    this.apiKeys = normalizeGroqApiKeys(Array.isArray(keys) ? keys : [keys]);
+  }
+
   setApiKey(key) {
-    this.apiKey = key;
+    this.setApiKeys(key ? [key] : []);
   }
 
   /**
@@ -322,29 +465,101 @@ class WhisperService {
     this.proxy = proxy;
   }
 
-  /**
-   * Transcribe an audio file via Groq API.
-   * @param {string}   audioPath   Path to WAV / MP3
-   * @param {object}   opts        { model, language, apiKey, proxy }
-   * @param {function} onProgress
-   * @returns {Promise<Array>}     Array of { start, end, text, words[] }
-   */
-  async transcribe(audioPath, opts = {}, onProgress) {
-    const model    = opts.model || 'whisper-large-v3';
-    const language = opts.language || 'ru';
-    const apiKey   = opts.apiKey || this.apiKey;
-    const proxy    = opts.proxy || this.proxy;
+  async _getAudioDuration(audioPath) {
+    return new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(audioPath, (err, metadata) => {
+        if (err) return reject(err);
+        resolve(Number(metadata?.format?.duration) || 0);
+      });
+    });
+  }
 
-    if (!apiKey) {
-      throw new Error('Groq API key not set. Add it in Settings.');
+  async _splitAudioIntoChunks(audioPath, chunkDurationSec, onProgress) {
+    const totalDuration = await this._getAudioDuration(audioPath);
+    if (!totalDuration || totalDuration <= chunkDurationSec) {
+      return [{ path: audioPath, offsetSec: 0, durationSec: totalDuration || 0, cleanup: false }];
     }
 
-    onProgress?.(`Transcribing audio [${model}] via Groq…`);
+    const chunks = [];
+    let offsetSec = 0;
+    let index = 0;
 
-    const result = await groqRequestWithRetry(apiKey, audioPath, model, language, proxy, onProgress);
+    while (offsetSec < totalDuration) {
+      const durationSec = Math.min(chunkDurationSec, totalDuration - offsetSec);
+      const outPath = path.join(os.tmpdir(), `ss_whisper_chunk_${Date.now()}_${index}.mp3`);
 
-    // Groq verbose_json response has segments with word-level timestamps
+      await new Promise((resolve, reject) => {
+        ffmpeg(audioPath)
+          .setStartTime(offsetSec)
+          .setDuration(durationSec)
+          .audioCodec('libmp3lame')
+          .audioChannels(1)
+          .audioFrequency(16000)
+          .audioBitrate('32k')
+          .format('mp3')
+          .output(outPath)
+          .on('end', resolve)
+          .on('error', (err, stdout, stderr) => reject(new Error(err.message + (stderr ? `\nstderr: ${stderr}` : ''))))
+          .run();
+      });
+
+      chunks.push({ path: outPath, offsetSec, durationSec, cleanup: true });
+      index++;
+      offsetSec += chunkDurationSec;
+      onProgress?.(`Prepared Whisper chunk ${index} (${Math.round(offsetSec)}s / ${Math.round(totalDuration)}s)…`);
+    }
+
+    return chunks;
+  }
+
+  async _splitExistingChunk(chunk, onProgress) {
+    const halfDuration = Math.max(MIN_CHUNK_DURATION_SEC, Math.floor((chunk.durationSec || 0) / 2));
+    if (!chunk.path || !chunk.durationSec || halfDuration >= chunk.durationSec) {
+      throw new Error('Whisper chunk is still too large and cannot be split further.');
+    }
+
+    const firstPath = path.join(os.tmpdir(), `ss_whisper_resplit_${Date.now()}_a.mp3`);
+    const secondPath = path.join(os.tmpdir(), `ss_whisper_resplit_${Date.now()}_b.mp3`);
+
+    const renderPiece = (startSec, durationSec, outPath) => new Promise((resolve, reject) => {
+      ffmpeg(chunk.path)
+        .setStartTime(startSec)
+        .setDuration(durationSec)
+        .audioCodec('copy')
+        .format('mp3')
+        .output(outPath)
+        .on('end', resolve)
+        .on('error', () => {
+          ffmpeg(chunk.path)
+            .setStartTime(startSec)
+            .setDuration(durationSec)
+            .audioCodec('libmp3lame')
+            .audioChannels(1)
+            .audioFrequency(16000)
+            .audioBitrate('32k')
+            .format('mp3')
+            .output(outPath)
+            .on('end', resolve)
+            .on('error', (err, stdout, stderr) => reject(new Error(err.message + (stderr ? `\nstderr: ${stderr}` : ''))))
+            .run();
+        })
+        .run();
+    });
+
+    const secondDuration = Math.max(0, chunk.durationSec - halfDuration);
+    onProgress?.(`Whisper chunk still too large. Splitting ${Math.round(chunk.durationSec)}s chunk into two smaller parts…`);
+    await renderPiece(0, halfDuration, firstPath);
+    await renderPiece(halfDuration, secondDuration, secondPath);
+
+    return [
+      { path: firstPath, offsetSec: chunk.offsetSec, durationSec: halfDuration, cleanup: true },
+      { path: secondPath, offsetSec: chunk.offsetSec + halfDuration, durationSec: secondDuration, cleanup: true }
+    ].filter((item) => item.durationSec > 0);
+  }
+
+  _parseVerboseResult(result) {
     const segments = [];
+
     if (result.segments && Array.isArray(result.segments)) {
       for (const seg of result.segments) {
         const words = [];
@@ -366,17 +581,17 @@ class WhisperService {
           words
         });
       }
-    } else if (result.words && Array.isArray(result.words) && result.words.length > 0) {
-      // No segments but we have words — reconstruct segments from words
-      const allWords = result.words.map(w => ({ word: w.word, start: w.start, end: w.end }));
-      // Group words into segments by sentence-ending punctuation or ~10s gaps
+      return segments;
+    }
+
+    if (result.words && Array.isArray(result.words) && result.words.length > 0) {
+      const allWords = result.words.map((w) => ({ word: w.word, start: w.start, end: w.end }));
       let segStart = allWords[0].start;
       let segWords = [];
       let prevEnd = allWords[0].start;
       for (const w of allWords) {
-        // Start a new segment on large gap or after sentence-ending punctuation
         if (segWords.length > 0 && (w.start - prevEnd > 1.5 || /[.!?]$/.test(segWords[segWords.length - 1].word))) {
-          const text = segWords.map(sw => sw.word).join(' ');
+          const text = segWords.map((sw) => sw.word).join(' ');
           segments.push({ start: segStart, end: segWords[segWords.length - 1].end, text: text.trim(), words: [...segWords] });
           segStart = w.start;
           segWords = [];
@@ -385,10 +600,13 @@ class WhisperService {
         prevEnd = w.end;
       }
       if (segWords.length > 0) {
-        const text = segWords.map(sw => sw.word).join(' ');
+        const text = segWords.map((sw) => sw.word).join(' ');
         segments.push({ start: segStart, end: segWords[segWords.length - 1].end, text: text.trim(), words: [...segWords] });
       }
-    } else if (result.text) {
+      return segments;
+    }
+
+    if (result.text) {
       segments.push({
         start: 0,
         end: 0,
@@ -397,8 +615,163 @@ class WhisperService {
       });
     }
 
+    return segments;
+  }
+
+  _shiftSegments(segments, offsetSec) {
+    return segments.map((seg) => ({
+      start: Math.max(0, Number(seg.start || 0) + offsetSec),
+      end: Math.max(0, Number(seg.end || 0) + offsetSec),
+      text: String(seg.text || '').trim(),
+      words: Array.isArray(seg.words)
+        ? seg.words.map((word) => ({
+          word: String(word.word || '').trim(),
+          start: Math.max(0, Number(word.start || 0) + offsetSec),
+          end: Math.max(0, Number(word.end || 0) + offsetSec)
+        }))
+        : []
+    }));
+  }
+
+  async _transcribeChunked(audioPath, model, language, apiKeys, proxy, onProgress) {
+    const fileSize = fs.statSync(audioPath).size;
+    const totalDuration = await this._getAudioDuration(audioPath);
+    const estimatedChunkDuration = totalDuration > 0
+      ? Math.floor((totalDuration * MAX_DIRECT_UPLOAD_BYTES) / Math.max(fileSize, 1) * 0.85)
+      : MAX_CHUNK_DURATION_SEC;
+    const chunkDurationSec = Math.max(MIN_CHUNK_DURATION_SEC, Math.min(MAX_CHUNK_DURATION_SEC, estimatedChunkDuration || MAX_CHUNK_DURATION_SEC));
+
+    onProgress?.(`Audio is too large for a single Groq upload. Splitting into ~${Math.round(chunkDurationSec / 60)} min Whisper chunks…`);
+    const chunks = await this._splitAudioIntoChunks(audioPath, chunkDurationSec, onProgress);
+    const fullSegments = [];
+
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        onProgress?.(`Transcribing Whisper chunk ${i + 1}/${chunks.length}…`);
+        try {
+          const result = await groqRequestWithRetry(
+            apiKeys,
+            chunk.path,
+            model,
+            language,
+            proxy,
+            (msg) => onProgress?.(`Chunk ${i + 1}/${chunks.length}: ${msg}`)
+          );
+          const parsed = this._parseVerboseResult(result);
+          fullSegments.push(...this._shiftSegments(parsed, chunk.offsetSec));
+        } catch (err) {
+          if (!isPayloadTooLargeError(err) || chunk.durationSec <= MIN_CHUNK_DURATION_SEC) {
+            throw err;
+          }
+          const replacementChunks = await this._splitExistingChunk(chunk, onProgress);
+          if (chunk.cleanup) {
+            try { fs.unlinkSync(chunk.path); } catch {}
+          }
+          chunks.splice(i, 1, ...replacementChunks);
+          i--;
+        }
+      }
+    } finally {
+      for (const chunk of chunks) {
+        if (!chunk.cleanup) continue;
+        try { fs.unlinkSync(chunk.path); } catch {}
+      }
+    }
+
+    return fullSegments;
+  }
+
+  /**
+   * Transcribe an audio file via Groq API.
+   * @param {string}   audioPath   Path to WAV / MP3
+   * @param {object}   opts        { model, language, apiKey, proxy }
+   * @param {function} onProgress
+   * @returns {Promise<Array>}     Array of { start, end, text, words[] }
+   */
+  async transcribe(audioPath, opts = {}, onProgress) {
+    const model    = opts.model || 'whisper-large-v3';
+    const language = opts.language || 'ru';
+    const apiKeys  = normalizeGroqApiKeys(
+      opts.apiKeys !== undefined ? opts.apiKeys : this.apiKeys,
+      opts.apiKey || ''
+    );
+    const proxy    = opts.proxy || this.proxy;
+
+    if (!apiKeys.length) {
+      throw new Error('Groq API keys not set. Add at least one in Settings.');
+    }
+
+    onProgress?.(`Transcribing audio [${model}] via Groq…`);
+
+    const fileSize = fs.statSync(audioPath).size;
+    let segments;
+
+    if (fileSize > MAX_DIRECT_UPLOAD_BYTES) {
+      segments = await this._transcribeChunked(audioPath, model, language, apiKeys, proxy, onProgress);
+    } else {
+      try {
+        const result = await groqRequestWithRetry(apiKeys, audioPath, model, language, proxy, onProgress);
+        segments = this._parseVerboseResult(result);
+      } catch (err) {
+        if (!isPayloadTooLargeError(err)) throw err;
+        onProgress?.('Groq rejected the full upload with 413. Retrying with Whisper chunking…');
+        segments = await this._transcribeChunked(audioPath, model, language, apiKeys, proxy, onProgress);
+      }
+    }
+
     onProgress?.(`Transcription complete: ${segments.length} segments`);
     return segments;
+  }
+
+  /**
+   * Slice transcript segments into a local clip timeline.
+   * Returned timestamps are shifted so the clip starts at 0.
+   * @param {Array} segments
+   * @param {number} clipStartSec
+   * @param {number} clipEndSec
+   * @returns {Array}
+   */
+  sliceSegments(segments, clipStartSec, clipEndSec) {
+    const startSec = Math.max(0, Number(clipStartSec) || 0);
+    const endSec = Math.max(startSec, Number(clipEndSec) || startSec);
+    const out = [];
+
+    for (const seg of Array.isArray(segments) ? segments : []) {
+      const segStart = Number(seg?.start) || 0;
+      const segEnd = Number(seg?.end) || segStart;
+      if (segEnd <= startSec || segStart >= endSec) continue;
+
+      const shiftedStart = Math.max(0, segStart - startSec);
+      const shiftedEnd = Math.max(shiftedStart + 0.01, Math.min(segEnd, endSec) - startSec);
+      const words = Array.isArray(seg?.words)
+        ? seg.words
+          .filter((word) => {
+            const wordStart = Number(word?.start) || 0;
+            const wordEnd = Number(word?.end) || wordStart;
+            return wordEnd > startSec && wordStart < endSec;
+          })
+          .map((word) => {
+            const wordStart = Number(word?.start) || 0;
+            const wordEnd = Number(word?.end) || wordStart;
+            return {
+              word: String(word?.word || '').trim(),
+              start: Math.max(0, wordStart - startSec),
+              end: Math.max(0, Math.min(wordEnd, endSec) - startSec)
+            };
+          })
+          .filter((word) => word.word && word.end > word.start)
+        : [];
+
+      out.push({
+        start: shiftedStart,
+        end: shiftedEnd,
+        text: String(seg?.text || '').trim(),
+        words
+      });
+    }
+
+    return out.filter((seg) => seg.text || (Array.isArray(seg.words) && seg.words.length > 0));
   }
 
   /**
