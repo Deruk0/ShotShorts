@@ -2,6 +2,17 @@
   "name": "shotshorts",
   "version": "2.0.0",
   "description": "ShotShorts - AI-powered short video generator from long videos with ADHD background footage",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "app:start": "npm --workspace app start",
+    "app:check-resources": "npm --workspace app run check:resources",
+    "app:build": "npm --workspace app run build",
+    "app:build:fast": "npm --workspace app run build:fast",
+    "app:build:portable": "npm --workspace app run build:portable",
+    "web:dev": "npm --workspace web run dev",
+    "web:build": "npm --workspace web run build",
+    "web:lint": "npm --workspace web run lint"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Deruk0/ShotShorts.git"

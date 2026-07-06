@@ -9,9 +9,12 @@ const { GroqStoryAnalyzer } = require('./groq-story-analyzer');
 const { FontManager } = require('./font-manager');
 const { SubtitleRenderer } = require('./subtitle-renderer');
 const { getProxy, getGroqApiKeys } = require('./store');
+const { isAbortError, runFfmpegCommand, throwIfAborted } = require('./cancellation');
 
 let processor = null;
 let isRunning = false;
+let activeAbortController = null;
+let activeSubtitleRenderer = null;
 
 const STORY_PADDING_SEC = 5;
 const TARGET_CHUNK_DURATION_SEC = 180;
@@ -148,12 +151,12 @@ function buildSubtitleOptions(config) {
   };
 }
 
-function prepareAudioForWhisper(inputAudioPath, onProgress) {
+function prepareAudioForWhisper(inputAudioPath, onProgress, signal) {
+  throwIfAborted(signal);
   const outPath = path.join(os.tmpdir(), `ss_whisper_full_${Date.now()}.mp3`);
   onProgress?.({ step: 'Preparing Transcript Audio', percent: 0, message: 'Compressing audio for faster Whisper upload…' });
 
-  return new Promise((resolve, reject) => {
-    ffmpeg(inputAudioPath)
+  const cmd = ffmpeg(inputAudioPath)
       .audioCodec('libmp3lame')
       .audioChannels(1)
       .audioFrequency(16000)
@@ -161,16 +164,15 @@ function prepareAudioForWhisper(inputAudioPath, onProgress) {
       .format('mp3')
       .output(outPath)
       .on('progress', (info) => {
+        if (signal?.aborted) return;
         onProgress?.({
           step: 'Preparing Transcript Audio',
           percent: Math.min(Number(info?.percent) || 0, 100),
           message: `Compressing audio for Whisper… ${Math.round(Number(info?.percent) || 0)}%`
         });
-      })
-      .on('end', () => resolve(outPath))
-      .on('error', (err, stdout, stderr) => reject(new Error(err.message + (stderr ? `\nstderr: ${stderr}` : ''))))
-      .run();
-  });
+      });
+
+  return runFfmpegCommand(cmd, { signal }).then(() => outPath);
 }
 
 function register() {
@@ -189,12 +191,16 @@ function register() {
     isRunning = true;
     processor = mp;
     mp.reset();
+    const abortController = new AbortController();
+    activeAbortController = abortController;
+    const { signal } = abortController;
 
     const send = (data) => { try { win.webContents.send('process:progress', data); } catch {} };
     const tempFiles = [];
     let subtitleRenderer = null;
 
     try {
+      throwIfAborted(signal);
       if (!fs.existsSync(config.sourceVideo)) return { success: false, error: 'Source media not found' };
       if (!fs.existsSync(config.backgroundFolder)) return { success: false, error: 'Background folder not found' };
       if (!fs.existsSync(config.outputFolder)) fs.mkdirSync(config.outputFolder, { recursive: true });
@@ -207,13 +213,16 @@ function register() {
 
       send({ step: 'Extracting Audio', percent: 2, message: 'Preparing source media…' });
       const audioPath = await mp.extractAudio(config.sourceVideo, send);
+      throwIfAborted(signal);
       if (audioPath) tempFiles.push(audioPath);
       const sourceAudioDuration = await mp.getVideoDuration(audioPath);
+      throwIfAborted(signal);
       const whisperAudioPath = await prepareAudioForWhisper(audioPath, (data) => send({
         step: data.step,
         percent: 10,
         message: data.message
-      }));
+      }), signal);
+      throwIfAborted(signal);
       if (whisperAudioPath) tempFiles.push(whisperAudioPath);
 
       const subtitlesEnabled = !!config.subtitlesEnabled;
@@ -229,9 +238,10 @@ function register() {
       send({ step: 'Transcribing Audio', percent: 12, message: `Sending audio to Groq Whisper (${subtitleModel})…` });
       const transcriptSegments = await whisper.transcribe(
         whisperAudioPath,
-        { model: subtitleModel, language: subtitleLanguage, apiKeys: groqApiKeys, proxy },
+        { model: subtitleModel, language: subtitleLanguage, apiKeys: groqApiKeys, proxy, signal },
         (msg) => send({ step: 'Transcribing Audio', percent: 20, message: msg })
       );
+      throwIfAborted(signal);
 
       if (!transcriptSegments.length) {
         return { success: false, error: 'Whisper returned no transcript.' };
@@ -242,8 +252,10 @@ function register() {
       const analysis = await analyzer.analyzeTranscript(
         transcriptSegments,
         sourceAudioDuration,
-        (msg) => send({ step: 'Analyzing Stories', percent: 36, message: msg })
+        (msg) => send({ step: 'Analyzing Stories', percent: 36, message: msg }),
+        { signal }
       );
+      throwIfAborted(signal);
 
       const normalizedStories = normalizeStories(analysis.stories, sourceAudioDuration);
       if (!normalizedStories.length) {
@@ -271,8 +283,10 @@ function register() {
 
       if (subtitlesEnabled) {
         try {
+          throwIfAborted(signal);
           const fm = new FontManager();
-          await fm.ensureTtfFonts((msg) => send({ step: 'Preparing Fonts', percent: 48, message: msg }));
+          await fm.ensureTtfFonts((msg) => send({ step: 'Preparing Fonts', percent: 48, message: msg }), signal);
+          throwIfAborted(signal);
           if (fm.hasAnyTtf()) {
             subtitleOptions.fontsDir = fm.getTtfDir();
           } else {
@@ -289,8 +303,10 @@ function register() {
       const basePercent = 50;
       const perChunkPercent = 45 / Math.max(chunks.length, 1);
       subtitleRenderer = subtitlesEnabled ? new SubtitleRenderer() : null;
+      activeSubtitleRenderer = subtitleRenderer;
 
       for (let i = 0; i < chunks.length; i++) {
+        throwIfAborted(signal);
         const chunk = chunks[i];
         const percentBase = basePercent + i * perChunkPercent;
         const sp = (data) => send({
@@ -312,14 +328,17 @@ function register() {
                   {
                     ...subtitleOptions,
                     offsetSec: subtitleOffsetSec,
-                    duration: chunk.end - chunk.start
+                    duration: chunk.end - chunk.start,
+                    signal
                   },
                   os.tmpdir(),
                   (msg) => sp({ step: `Preparing Story ${chunk.index}`, percent: 25, message: msg })
                 );
+                throwIfAborted(signal);
                 tempFiles.push(renderedSubtitle);
                 subtitlePath = renderedSubtitle;
               } catch (renderErr) {
+                if (isAbortError(renderErr) || signal.aborted) throw renderErr;
                 console.log('[ShotShorts] HTML subtitle renderer failed, falling back to ASS:', renderErr.message);
                 sp({ step: `Preparing Story ${chunk.index}`, percent: 55, message: 'Preview-matched renderer failed, using ASS fallback…' });
                 const assContent = whisper.toASS(
@@ -339,6 +358,7 @@ function register() {
               sp({ step: `Preparing Story ${chunk.index}`, percent: 100, message: 'No subtitle text inside this clip window' });
             }
           } catch (subtitleErr) {
+            if (isAbortError(subtitleErr) || signal.aborted) throw subtitleErr;
             subtitleFailures.push(chunk.index);
             subtitlePath = null;
             send({
@@ -358,6 +378,7 @@ function register() {
           subtitlePath,
           subtitleOptions
         );
+        throwIfAborted(signal);
         outputFiles.push(out);
       }
 
@@ -374,6 +395,10 @@ function register() {
         storiesDetected: normalizedStories.length
       };
     } catch (err) {
+      if (isAbortError(err) || signal.aborted) {
+        send({ step: 'Cancelled', percent: 0, message: 'Generation cancelled.' });
+        return { success: false, cancelled: true, error: 'Cancelled' };
+      }
       const msg = err.message || 'Unknown error';
       send({ step: 'Error', percent: 0, message: msg });
       return { success: false, error: msg };
@@ -382,6 +407,8 @@ function register() {
         if (subtitleRenderer) await subtitleRenderer.close();
       } catch {}
       processor = null;
+      activeAbortController = null;
+      if (activeSubtitleRenderer === subtitleRenderer) activeSubtitleRenderer = null;
       isRunning = false;
       for (const file of tempFiles) {
         try { if (file) fs.unlinkSync(file); } catch {}
@@ -390,7 +417,11 @@ function register() {
   });
 
   ipcMain.on('process:cancel', () => {
+    if (activeAbortController && !activeAbortController.signal.aborted) {
+      activeAbortController.abort();
+    }
     if (processor) processor.cancel();
+    if (activeSubtitleRenderer) activeSubtitleRenderer.cancel();
   });
 }
 

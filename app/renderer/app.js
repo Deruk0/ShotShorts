@@ -5,6 +5,7 @@ let sourcePath = null;
 let bgFolderPath = null;
 let outputFolderPath = null;
 let isProcessing = false;
+let cancelRequested = false;
 let progressCleanup = null;
 let processStartTime = null;
 let etaInterval = null;
@@ -969,6 +970,7 @@ $('#btn-cancel').addEventListener('click', cancelGeneration);
 
 async function startGeneration() {
   isProcessing = true;
+  cancelRequested = false;
   setControlsDisabled(true);
   processStartTime = Date.now();
   progressSamples = [];
@@ -1019,15 +1021,24 @@ async function startGeneration() {
       stats.lastRun = new Date().toLocaleString();
       saveStats();
       renderStats();
+    } else if (result.cancelled) {
+      setStatus('idle', 'Ready');
+      showProgress('Cancelled', 0, 'Generation cancelled');
     } else {
       setStatus('error', 'Error');
       showProgress('Error', 0, result.error || 'Unknown error');
     }
   } catch (err) {
-    setStatus('error', 'Error');
-    showProgress('Error', 0, String(err));
+    if (cancelRequested) {
+      setStatus('idle', 'Ready');
+      showProgress('Cancelled', 0, 'Generation cancelled');
+    } else {
+      setStatus('error', 'Error');
+      showProgress('Error', 0, String(err));
+    }
   } finally {
     isProcessing = false;
+    cancelRequested = false;
     setControlsDisabled(false);
     processStartTime = null;
     progressSamples = [];
@@ -1035,23 +1046,18 @@ async function startGeneration() {
     if (progressCleanup) progressCleanup();
     $('#btn-generate').style.display = '';
     $('#btn-cancel').style.display = 'none';
+    $('#btn-cancel').disabled = false;
     updateGenerateBtn();
   }
 }
 
 function cancelGeneration() {
+  if (!isProcessing || cancelRequested) return;
+  cancelRequested = true;
   window.api.cancelProcessing();
-  isProcessing = false;
-  setControlsDisabled(false);
-  processStartTime = null;
-  progressSamples = [];
-  if (etaInterval) { clearInterval(etaInterval); etaInterval = null; }
-  if (progressCleanup) progressCleanup();
-  setStatus('idle', 'Ready');
-  hideProgress();
-  $('#btn-generate').style.display = '';
-  $('#btn-cancel').style.display = 'none';
-  updateGenerateBtn();
+  $('#btn-cancel').disabled = true;
+  setStatus('processing', 'Processing…');
+  showProgress('Cancelling…', lastProgressPercent || 0, 'Stopping current work…');
 }
 
 // ===== UI HELPERS =====

@@ -10,6 +10,7 @@ const path = require('path');
 const os = require('os');
 const ffmpeg = require('fluent-ffmpeg');
 const { FontManager } = require('./font-manager');
+const { createAbortError, runFfmpegCommand, throwIfAborted } = require('./cancellation');
 
 const TMP_DIR = path.join(os.tmpdir(), 'shotshorts_subtitles');
 
@@ -90,6 +91,17 @@ class SubtitleRenderer {
     this.browser = null;
     this.page = null;
     this.chromiumPath = null;
+    this.cancelled = false;
+  }
+
+  cancel() {
+    this.cancelled = true;
+    this.close().catch(() => {});
+  }
+
+  _throwIfCancelled(signal) {
+    if (this.cancelled) throw createAbortError();
+    throwIfAborted(signal);
   }
 
   isAvailable() {
@@ -136,6 +148,10 @@ class SubtitleRenderer {
    * Falls back to ASS rendering if Playwright unavailable.
    */
   async renderSubtitleTrack(segments, options, outputDir, onProgress) {
+    this.cancelled = false;
+    const signal = options.signal;
+    this._throwIfCancelled(signal);
+
     // Check if Playwright is available
     if (!this.isAvailable()) {
       throw new Error('Playwright Chromium not available');
@@ -145,8 +161,10 @@ class SubtitleRenderer {
     ensureDir(outputDir);
 
     // 1. Ensure fonts are downloaded
-    await this.fontManager.ensureFonts(onProgress);
+    await this.fontManager.ensureFonts(onProgress, signal);
+    this._throwIfCancelled(signal);
     await this._ensureBrowser(onProgress);
+    this._throwIfCancelled(signal);
 
     const fontCSS = this.fontManager.getFontCSS(options.fontFamily || 'Inter') || '';
     const styleCSS = this._buildStyleCSS(options);
@@ -167,6 +185,7 @@ class SubtitleRenderer {
     const totalSegments = segments.length;
 
     for (let si = 0; si < totalSegments; si++) {
+      this._throwIfCancelled(signal);
       const seg = segments[si];
       const segStart = Number(seg.start) || 0;
       const segEnd = Number(seg.end) || (segStart + 1);
@@ -208,7 +227,7 @@ class SubtitleRenderer {
 
               const pngPath = path.join(TMP_DIR, `ss_sub_${Date.now()}_${frameIdx++}.png`);
               const html = this._buildHTML(fontCSS, styleCSS, fontFamily, fontSize, position, marginV, chunkWords, wi, options);
-              await this._renderFrame(html, pngPath, onProgress);
+              await this._renderFrame(html, pngPath, onProgress, signal);
               subtitleFrames.push({
                 path: pngPath,
                 start: Math.max(0, wStart - offsetSec),
@@ -218,7 +237,7 @@ class SubtitleRenderer {
           } else {
             const pngPath = path.join(TMP_DIR, `ss_sub_${Date.now()}_${frameIdx++}.png`);
             const html = this._buildHTML(fontCSS, styleCSS, fontFamily, fontSize, position, marginV, chunkWords, -1, options);
-            await this._renderFrame(html, pngPath, onProgress);
+            await this._renderFrame(html, pngPath, onProgress, signal);
             subtitleFrames.push({
               path: pngPath,
               start: Math.max(0, chunkStart - offsetSec),
@@ -245,7 +264,7 @@ class SubtitleRenderer {
 
           const pngPath = path.join(TMP_DIR, `ss_sub_${Date.now()}_${frameIdx++}.png`);
           const html = this._buildHTML(fontCSS, styleCSS, fontFamily, fontSize, position, marginV, chunkText, -1, options);
-          await this._renderFrame(html, pngPath, onProgress);
+          await this._renderFrame(html, pngPath, onProgress, signal);
           subtitleFrames.push({
             path: pngPath,
             start: Math.max(0, wordStart - offsetSec),
@@ -256,12 +275,13 @@ class SubtitleRenderer {
       }
     }
 
+    this._throwIfCancelled(signal);
     if (subtitleFrames.length === 0) {
       throw new Error('No subtitle frames were rendered');
     }
 
     const transparentPath = path.join(TMP_DIR, `ss_sub_transparent_${Date.now()}.png`);
-    await this._renderFrame(this._buildTransparentHTML(), transparentPath, onProgress);
+    await this._renderFrame(this._buildTransparentHTML(), transparentPath, onProgress, signal);
     const frames = this._buildTimelineFrames(subtitleFrames, transparentPath, trackDuration);
     if (frames.length === 0) {
       throw new Error('No subtitle frames remained after timing was applied');
@@ -285,7 +305,7 @@ class SubtitleRenderer {
 
       // 4. Assemble frames into WebM with alpha
       onProgress?.('Assembling subtitle video…');
-      await this._ffmpegConcatToWebM(listPath, outputWebM);
+      await this._ffmpegConcatToWebM(listPath, outputWebM, signal);
       return outputWebM;
     } finally {
       // 5. Cleanup temp PNGs
@@ -469,23 +489,27 @@ html, body {
 </html>`;
   }
 
-  async _renderFrame(html, outputPath, onProgress) {
+  async _renderFrame(html, outputPath, onProgress, signal) {
     try {
+      this._throwIfCancelled(signal);
       await this.page.setContent(html, { waitUntil: 'networkidle', timeout: 10000 });
+      this._throwIfCancelled(signal);
       await this.page.evaluate(() => document.fonts.ready);
+      this._throwIfCancelled(signal);
       await this.page.screenshot({
         path: outputPath,
         omitBackground: true,
         fullPage: false,
       });
+      this._throwIfCancelled(signal);
     } catch (err) {
       onProgress?.(`Subtitle render error: ${err.message}`);
       throw err;
     }
   }
 
-  async _ffmpegConcatToWebM(listPath, outputPath) {
-    return new Promise((resolve, reject) => {
+  async _ffmpegConcatToWebM(listPath, outputPath, signal) {
+    return runFfmpegCommand(
       ffmpeg()
         .input(listPath)
         .inputOptions(['-f', 'concat', '-safe', '0'])
@@ -499,11 +523,12 @@ html, body {
           '-cpu-used', '5',
           '-row-mt', '1'
         ])
-        .output(outputPath)
-        .on('end', () => resolve())
-        .on('error', (err) => reject(new Error(`FFmpeg subtitle assembly failed: ${err.message}`)))
-        .run();
-    });
+        .output(outputPath),
+      {
+        signal,
+        formatError: (err) => new Error(`FFmpeg subtitle assembly failed: ${err.message}`)
+      }
+    );
   }
 }
 

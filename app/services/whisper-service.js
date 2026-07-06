@@ -15,6 +15,7 @@ const ffmpeg = require('fluent-ffmpeg');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const { normalizeGroqApiKeys, pickAvailableGroqKey, setGroqKeyCooldown } = require('./groq-key-utils');
+const { abortableSleep, isAbortError, onAbort, runFfmpegCommand, throwIfAborted } = require('./cancellation');
 
 // ---------------------------------------------------------------------------
 // ASS style presets
@@ -226,14 +227,19 @@ function buildProxyAgent(proxy) {
 // ---------------------------------------------------------------------------
 // Groq API request helper
 // ---------------------------------------------------------------------------
-async function groqRequest(apiKey, audioPath, model, language, proxy) {
+async function groqRequest(apiKey, audioPath, model, language, proxy, signal) {
+  throwIfAborted(signal);
   const FormData = require('form-data');
   const form = new FormData();
   const ext = path.extname(audioPath).toLowerCase();
   const contentType = ext === '.mp3' ? 'audio/mpeg' : 'audio/wav';
   const fileSize = fs.statSync(audioPath).size;
+  const fileStream = fs.createReadStream(audioPath);
+  const cleanupAbort = onAbort(signal, () => {
+    fileStream.destroy();
+  });
 
-  form.append('file', fs.createReadStream(audioPath), {
+  form.append('file', fileStream, {
     filename: path.basename(audioPath),
     contentType
   });
@@ -259,7 +265,8 @@ async function groqRequest(apiKey, audioPath, model, language, proxy) {
     timeout: 300000,
     maxContentLength: Infinity,
     maxBodyLength: Infinity,
-    validateStatus: () => true
+    validateStatus: () => true,
+    signal
   };
 
   const agent = buildProxyAgent(proxy);
@@ -270,11 +277,16 @@ async function groqRequest(apiKey, audioPath, model, language, proxy) {
     console.log(`[Groq] No proxy configured, going direct. Proxy data:`, JSON.stringify(proxy));
   }
 
-  const response = await axios.post(
-    'https://api.groq.com/openai/v1/audio/transcriptions',
-    form,
-    config
-  );
+  let response;
+  try {
+    response = await axios.post(
+      'https://api.groq.com/openai/v1/audio/transcriptions',
+      form,
+      config
+    );
+  } finally {
+    cleanupAbort();
+  }
 
   if (response.status >= 200 && response.status < 300) {
     return response.data;
@@ -373,15 +385,14 @@ function getRateLimitDelayMs(err, fallbackMs = DEFAULT_RATE_LIMIT_DELAY_MS) {
   return fallbackMs;
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function waitForGroqTranscriptionKey(apiKeys, onProgress) {
+async function waitForGroqTranscriptionKey(apiKeys, onProgress, signal) {
   const normalizedKeys = normalizeGroqApiKeys(apiKeys);
   if (!normalizedKeys.length) {
     throw new Error('Groq API keys not set. Add at least one in Settings.');
   }
 
   while (true) {
+    throwIfAborted(signal);
     const selected = pickAvailableGroqKey(normalizedKeys, groqTranscriptionKeyCooldowns, groqTranscriptionKeyCursor);
     if (selected.apiKey) {
       return selected;
@@ -389,24 +400,26 @@ async function waitForGroqTranscriptionKey(apiKeys, onProgress) {
 
     const waitMs = Math.max(1000, selected.waitMs || DEFAULT_RATE_LIMIT_DELAY_MS);
     onProgress?.(`All Groq Whisper keys are cooling down. Waiting ${Math.ceil(waitMs / 1000)}s…`);
-    await sleep(waitMs);
+    await abortableSleep(waitMs, signal);
   }
 }
 
 // Wraps groqRequest with retry + exponential backoff for transient failures.
 // Each retry re-creates the request (and its file read stream) from scratch.
-async function groqRequestWithRetry(apiKeys, audioPath, model, language, proxy, onProgress, maxRetries = 3) {
+async function groqRequestWithRetry(apiKeys, audioPath, model, language, proxy, onProgress, signal, maxRetries = 3) {
   let lastErr = null;
   let rateLimitRetries = 0;
   let transientRetries = 0;
 
   while (true) {
-    const selectedKey = await waitForGroqTranscriptionKey(apiKeys, onProgress);
+    throwIfAborted(signal);
+    const selectedKey = await waitForGroqTranscriptionKey(apiKeys, onProgress, signal);
 
     try {
-      return await groqRequest(selectedKey.apiKey, audioPath, model, language, proxy);
+      return await groqRequest(selectedKey.apiKey, audioPath, model, language, proxy, signal);
     } catch (err) {
       lastErr = err;
+      if (isAbortError(err)) throw err;
 
       if (isRateLimitError(err)) {
         if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
@@ -425,7 +438,7 @@ async function groqRequestWithRetry(apiKeys, audioPath, model, language, proxy, 
         transientRetries++;
         console.warn(`[Groq] Transcription attempt ${transientRetries}/${maxRetries + 1} failed (${code}). Retrying in ${delayMs}ms…`);
         onProgress?.(`Network issue (${code}). Retrying Whisper request in ${Math.ceil(delayMs / 1000)}s…`);
-        await sleep(delayMs);
+        await abortableSleep(delayMs, signal);
         continue;
       }
 
@@ -465,17 +478,23 @@ class WhisperService {
     this.proxy = proxy;
   }
 
-  async _getAudioDuration(audioPath) {
+  async _getAudioDuration(audioPath, signal) {
+    throwIfAborted(signal);
     return new Promise((resolve, reject) => {
       ffmpeg.ffprobe(audioPath, (err, metadata) => {
         if (err) return reject(err);
-        resolve(Number(metadata?.format?.duration) || 0);
+        try {
+          throwIfAborted(signal);
+          resolve(Number(metadata?.format?.duration) || 0);
+        } catch (abortErr) {
+          reject(abortErr);
+        }
       });
     });
   }
 
-  async _splitAudioIntoChunks(audioPath, chunkDurationSec, onProgress) {
-    const totalDuration = await this._getAudioDuration(audioPath);
+  async _splitAudioIntoChunks(audioPath, chunkDurationSec, onProgress, signal) {
+    const totalDuration = await this._getAudioDuration(audioPath, signal);
     if (!totalDuration || totalDuration <= chunkDurationSec) {
       return [{ path: audioPath, offsetSec: 0, durationSec: totalDuration || 0, cleanup: false }];
     }
@@ -485,10 +504,11 @@ class WhisperService {
     let index = 0;
 
     while (offsetSec < totalDuration) {
+      throwIfAborted(signal);
       const durationSec = Math.min(chunkDurationSec, totalDuration - offsetSec);
       const outPath = path.join(os.tmpdir(), `ss_whisper_chunk_${Date.now()}_${index}.mp3`);
 
-      await new Promise((resolve, reject) => {
+      await runFfmpegCommand(
         ffmpeg(audioPath)
           .setStartTime(offsetSec)
           .setDuration(durationSec)
@@ -497,11 +517,9 @@ class WhisperService {
           .audioFrequency(16000)
           .audioBitrate('32k')
           .format('mp3')
-          .output(outPath)
-          .on('end', resolve)
-          .on('error', (err, stdout, stderr) => reject(new Error(err.message + (stderr ? `\nstderr: ${stderr}` : ''))))
-          .run();
-      });
+          .output(outPath),
+        { signal }
+      );
 
       chunks.push({ path: outPath, offsetSec, durationSec, cleanup: true });
       index++;
@@ -512,7 +530,7 @@ class WhisperService {
     return chunks;
   }
 
-  async _splitExistingChunk(chunk, onProgress) {
+  async _splitExistingChunk(chunk, onProgress, signal) {
     const halfDuration = Math.max(MIN_CHUNK_DURATION_SEC, Math.floor((chunk.durationSec || 0) / 2));
     if (!chunk.path || !chunk.durationSec || halfDuration >= chunk.durationSec) {
       throw new Error('Whisper chunk is still too large and cannot be split further.');
@@ -521,15 +539,21 @@ class WhisperService {
     const firstPath = path.join(os.tmpdir(), `ss_whisper_resplit_${Date.now()}_a.mp3`);
     const secondPath = path.join(os.tmpdir(), `ss_whisper_resplit_${Date.now()}_b.mp3`);
 
-    const renderPiece = (startSec, durationSec, outPath) => new Promise((resolve, reject) => {
-      ffmpeg(chunk.path)
-        .setStartTime(startSec)
-        .setDuration(durationSec)
-        .audioCodec('copy')
-        .format('mp3')
-        .output(outPath)
-        .on('end', resolve)
-        .on('error', () => {
+    const renderPiece = async (startSec, durationSec, outPath) => {
+      throwIfAborted(signal);
+      try {
+        await runFfmpegCommand(
+          ffmpeg(chunk.path)
+            .setStartTime(startSec)
+            .setDuration(durationSec)
+            .audioCodec('copy')
+            .format('mp3')
+            .output(outPath),
+          { signal }
+        );
+      } catch (err) {
+        if (isAbortError(err)) throw err;
+        await runFfmpegCommand(
           ffmpeg(chunk.path)
             .setStartTime(startSec)
             .setDuration(durationSec)
@@ -538,13 +562,11 @@ class WhisperService {
             .audioFrequency(16000)
             .audioBitrate('32k')
             .format('mp3')
-            .output(outPath)
-            .on('end', resolve)
-            .on('error', (err, stdout, stderr) => reject(new Error(err.message + (stderr ? `\nstderr: ${stderr}` : ''))))
-            .run();
-        })
-        .run();
-    });
+            .output(outPath),
+          { signal }
+        );
+      }
+    };
 
     const secondDuration = Math.max(0, chunk.durationSec - halfDuration);
     onProgress?.(`Whisper chunk still too large. Splitting ${Math.round(chunk.durationSec)}s chunk into two smaller parts…`);
@@ -633,20 +655,22 @@ class WhisperService {
     }));
   }
 
-  async _transcribeChunked(audioPath, model, language, apiKeys, proxy, onProgress) {
+  async _transcribeChunked(audioPath, model, language, apiKeys, proxy, onProgress, signal) {
+    throwIfAborted(signal);
     const fileSize = fs.statSync(audioPath).size;
-    const totalDuration = await this._getAudioDuration(audioPath);
+    const totalDuration = await this._getAudioDuration(audioPath, signal);
     const estimatedChunkDuration = totalDuration > 0
       ? Math.floor((totalDuration * MAX_DIRECT_UPLOAD_BYTES) / Math.max(fileSize, 1) * 0.85)
       : MAX_CHUNK_DURATION_SEC;
     const chunkDurationSec = Math.max(MIN_CHUNK_DURATION_SEC, Math.min(MAX_CHUNK_DURATION_SEC, estimatedChunkDuration || MAX_CHUNK_DURATION_SEC));
 
     onProgress?.(`Audio is too large for a single Groq upload. Splitting into ~${Math.round(chunkDurationSec / 60)} min Whisper chunks…`);
-    const chunks = await this._splitAudioIntoChunks(audioPath, chunkDurationSec, onProgress);
+    const chunks = await this._splitAudioIntoChunks(audioPath, chunkDurationSec, onProgress, signal);
     const fullSegments = [];
 
     try {
       for (let i = 0; i < chunks.length; i++) {
+        throwIfAborted(signal);
         const chunk = chunks[i];
         onProgress?.(`Transcribing Whisper chunk ${i + 1}/${chunks.length}…`);
         try {
@@ -656,7 +680,8 @@ class WhisperService {
             model,
             language,
             proxy,
-            (msg) => onProgress?.(`Chunk ${i + 1}/${chunks.length}: ${msg}`)
+            (msg) => onProgress?.(`Chunk ${i + 1}/${chunks.length}: ${msg}`),
+            signal
           );
           const parsed = this._parseVerboseResult(result);
           fullSegments.push(...this._shiftSegments(parsed, chunk.offsetSec));
@@ -664,7 +689,7 @@ class WhisperService {
           if (!isPayloadTooLargeError(err) || chunk.durationSec <= MIN_CHUNK_DURATION_SEC) {
             throw err;
           }
-          const replacementChunks = await this._splitExistingChunk(chunk, onProgress);
+          const replacementChunks = await this._splitExistingChunk(chunk, onProgress, signal);
           if (chunk.cleanup) {
             try { fs.unlinkSync(chunk.path); } catch {}
           }
@@ -697,6 +722,8 @@ class WhisperService {
       opts.apiKey || ''
     );
     const proxy    = opts.proxy || this.proxy;
+    const signal   = opts.signal;
+    throwIfAborted(signal);
 
     if (!apiKeys.length) {
       throw new Error('Groq API keys not set. Add at least one in Settings.');
@@ -708,15 +735,16 @@ class WhisperService {
     let segments;
 
     if (fileSize > MAX_DIRECT_UPLOAD_BYTES) {
-      segments = await this._transcribeChunked(audioPath, model, language, apiKeys, proxy, onProgress);
+      segments = await this._transcribeChunked(audioPath, model, language, apiKeys, proxy, onProgress, signal);
     } else {
       try {
-        const result = await groqRequestWithRetry(apiKeys, audioPath, model, language, proxy, onProgress);
+        const result = await groqRequestWithRetry(apiKeys, audioPath, model, language, proxy, onProgress, signal);
         segments = this._parseVerboseResult(result);
       } catch (err) {
+        if (isAbortError(err)) throw err;
         if (!isPayloadTooLargeError(err)) throw err;
         onProgress?.('Groq rejected the full upload with 413. Retrying with Whisper chunking…');
-        segments = await this._transcribeChunked(audioPath, model, language, apiKeys, proxy, onProgress);
+        segments = await this._transcribeChunked(audioPath, model, language, apiKeys, proxy, onProgress, signal);
       }
     }
 

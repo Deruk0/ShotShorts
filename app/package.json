@@ -6,8 +6,12 @@
   "author": "Deruk0",
   "scripts": {
     "start": "node launch.js",
-    "build": "electron-builder",
-    "build:fast": "electron-builder --dir"
+    "check:resources": "node scripts/validate-build-resources.js --warn-only",
+    "prebuild": "node scripts/validate-build-resources.js",
+    "prebuild:fast": "node scripts/validate-build-resources.js",
+    "build": "electron-builder --dir",
+    "build:fast": "electron-builder --dir",
+    "build:portable": "electron-builder --win portable"
   },
   "dependencies": {
     "axios": "^1.7.9",
@@ -35,14 +39,22 @@
       "preload.js",
       "services/**",
       "renderer/**",
-      "resources/**",
       "icon.png",
       "icon.svg"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "resources",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "win": {
       "target": [
         {
-          "target": "portable",
+          "target": "dir",
           "arch": [
             "x64"
           ]

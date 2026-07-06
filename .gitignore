@@ -1,11 +1,28 @@
 # Dependencies
 node_modules/
 
+# Secrets / local env
+.env
+.env.*
+!.env.example
+*.local
+
 # Temp
 .temp_ag_kit/
 antigravity-doc
 tests
 others
+*.tmp
+*.temp
+*.orig
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local AI assistant state
+.claude/
+.openclaude/
 
 # Build outputs
 dist/
@@ -16,6 +33,8 @@ out/
 # Electron build artifacts
 Ready_App_EXE/
 app/dist/
+app/resources/ffmpeg.exe
+app/resources/ffprobe.exe
 
 # OS
 .DS_Store

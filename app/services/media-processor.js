@@ -2,6 +2,7 @@ const ffmpeg = require('fluent-ffmpeg');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { createAbortError, runFfmpegCommand } = require('./cancellation');
 
 const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.avi', '.mov', '.webm', '.m4v']);
 const SRT_STYLE_PRESETS = {
@@ -16,6 +17,7 @@ const SRT_STYLE_PRESETS = {
 class MediaProcessor {
   constructor() {
     this.cancelled = false;
+    this.activeCommands = new Set();
     this._detectFfmpeg();
   }
 
@@ -49,8 +51,32 @@ class MediaProcessor {
     }
   }
 
-  cancel() { this.cancelled = true; }
-  reset() { this.cancelled = false; }
+  cancel() {
+    this.cancelled = true;
+    for (const cmd of this.activeCommands) {
+      try { cmd.kill('SIGKILL'); } catch {}
+    }
+  }
+
+  reset() {
+    this.cancelled = false;
+    this.activeCommands.clear();
+  }
+
+  _throwIfCancelled() {
+    if (this.cancelled) throw createAbortError();
+  }
+
+  _runCommand(cmd) {
+    this._throwIfCancelled();
+    return runFfmpegCommand(cmd, {
+      onStart: (activeCmd) => this.activeCommands.add(activeCmd),
+      formatError: (e, stdout, stderr) => new Error(e.message + (stderr ? '\nstderr: ' + stderr : ''))
+    }).finally(() => {
+      this.activeCommands.delete(cmd);
+      this._throwIfCancelled();
+    });
+  }
 
   _buildSrtForceStyle(subtitleOptions = {}) {
     const position = subtitleOptions.position || 'bottom';
@@ -95,26 +121,28 @@ class MediaProcessor {
     const out = path.join(os.tmpdir(), `ss_audio_${Date.now()}.wav`);
     onProgress?.({ step: 'Extracting Audio', percent: 5, message: 'Separating audio track…' });
 
-    return new Promise((resolve, reject) => {
-      ffmpeg(videoPath)
+    const cmd = ffmpeg(videoPath)
         .noVideo().audioCodec('pcm_s16le').audioChannels(2).audioFrequency(44100).format('wav').output(out)
-        .on('progress', i => onProgress?.({ step: 'Extracting Audio', percent: 5 + Math.min(i.percent || 0, 100) * 0.15, message: `${Math.round(i.percent || 0)}%` }))
-        .on('end', () => resolve(out))
-        .on('error', (e, stdout, stderr) => reject(new Error(e.message + (stderr ? '\nstderr: ' + stderr : ''))))
-        .run();
-    });
+        .on('progress', i => {
+          if (!this.cancelled) {
+            onProgress?.({ step: 'Extracting Audio', percent: 5 + Math.min(i.percent || 0, 100) * 0.15, message: `${Math.round(i.percent || 0)}%` });
+          }
+        });
+
+    return this._runCommand(cmd).then(() => out);
   }
 
   downsampleAudioForAI(inputAudio, onProgress) {
     const out = path.join(os.tmpdir(), `ss_ai_${Date.now()}.wav`);
-    return new Promise((resolve, reject) => {
-      ffmpeg(inputAudio)
+    const cmd = ffmpeg(inputAudio)
         .audioCodec('pcm_s16le').audioBitrate(16).audioChannels(1).audioFrequency(16000).format('wav').output(out)
-        .on('progress', i => onProgress?.({ step: 'Analyzing Audio', percent: 22, message: `Optimizing for AI... ${Math.round(i.percent || 0)}%` }))
-        .on('end', () => resolve(out))
-        .on('error', (e, stdout, stderr) => reject(new Error(e.message + (stderr ? '\nstderr: ' + stderr : ''))))
-        .run();
-    });
+        .on('progress', i => {
+          if (!this.cancelled) {
+            onProgress?.({ step: 'Analyzing Audio', percent: 22, message: `Optimizing for AI... ${Math.round(i.percent || 0)}%` });
+          }
+        });
+
+    return this._runCommand(cmd).then(() => out);
   }
 
 
@@ -137,7 +165,7 @@ class MediaProcessor {
    * @param {string|null} subtitlePath  Optional path to subtitle file (.ass/.srt) to burn in.
    */
   async assembleVideo(segment, audioPath, bgContext, outputDir, onProgress, subtitlePath = null, subtitleOptions = {}) {
-    if (this.cancelled) throw new Error('Cancelled');
+    this._throwIfCancelled();
 
     console.log(`[ShotShorts] assembleVideo called, subtitlePath: ${subtitlePath || 'null'}`);
 
@@ -151,15 +179,12 @@ class MediaProcessor {
     const segAudio = path.join(os.tmpdir(), `ss_seg_${pId}_${Date.now()}.wav`);
 
     // Cut segment audio
-    await new Promise((res, rej) => {
+    await this._runCommand(
       ffmpeg(audioPath).setStartTime(segment.start).setDuration(duration)
         .audioCodec('pcm_s16le').audioChannels(2).audioFrequency(44100).format('wav')
         .output(segAudio)
-        .on('end', res)
-        .on('error', (e, stdout, stderr) => rej(new Error(e.message + (stderr ? '\nstderr: ' + stderr : ''))))
-        .run();
-    });
-    if (this.cancelled) throw new Error('Cancelled');
+    );
+    this._throwIfCancelled();
 
     // Build background list — add 5s safety margin to prevent video freezing
     // before audio ends due to PTS rounding in concat filter
@@ -194,7 +219,7 @@ class MediaProcessor {
       }
     }
 
-    if (this.cancelled) throw new Error('Cancelled');
+    this._throwIfCancelled();
 
     if (selected.length === 0) {
       throw new Error('No usable background videos found');
@@ -279,19 +304,18 @@ class MediaProcessor {
             '-movflags', '+faststart'
           ])
           .output(outFile)
-          .on('progress', progressHandler)
-          .on('end', () => res())
-          .on('error', (e, stdout, stderr) => rej(new Error(e.message + (stderr ? '\nstderr: ' + stderr : ''))))
-          .run();
+          .on('progress', progressHandler);
+
+        this._runCommand(cmd).then(res).catch(rej);
       });
     } catch (concatError) {
-      if (this.cancelled) throw new Error('Cancelled');
+      this._throwIfCancelled();
       onProgress?.({ step: `Rendering Story ${segment.index}`, percent: 0, message: `Concat failed, trying safe fallback...` });
       
       // Fallback: Re-create segAudio with explicit format to avoid corruption
       const safeSegAudio = path.join(os.tmpdir(), `ss_seg_safe_${pId}_${Date.now()}.wav`);
       try {
-        await new Promise((res, rej) => {
+        await this._runCommand(
           ffmpeg(audioPath)
             .setStartTime(segment.start)
             .setDuration(duration)
@@ -300,10 +324,7 @@ class MediaProcessor {
             .audioFrequency(44100)
             .format('wav')
             .output(safeSegAudio)
-            .on('end', res)
-            .on('error', (e, stdout, stderr) => rej(new Error(e.message + (stderr ? '\nstderr: ' + stderr : ''))))
-            .run();
-        });
+        );
       } catch (recreateErr) {
         throw new Error(`Failed to create segment audio: ${recreateErr.message}`);
       }
@@ -360,10 +381,15 @@ class MediaProcessor {
               '-movflags', '+faststart'
             ])
             .output(outFile)
-            .on('progress', progressHandler)
-            .on('end', () => res())
-            .on('error', (e, stdout, stderr) => rej(new Error(`Fallback failed: ${e.message}` + (stderr ? '\nstderr: ' + stderr : ''))))
-            .run();
+            .on('progress', progressHandler);
+
+          this._runCommand(cmd).then(res).catch((err) => {
+            if (this.cancelled) {
+              rej(err);
+            } else {
+              rej(new Error(`Fallback failed: ${err.message}`));
+            }
+          });
         });
       } finally {
         try { fs.unlinkSync(safeSegAudio); } catch {}

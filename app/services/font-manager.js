@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { app } = require('electron');
+const { createAbortError, isAbortError, onAbort, throwIfAborted } = require('./cancellation');
 
 const FONT_FAMILIES = {
   'Inter': { weights: [400, 700], urlName: 'Inter' },
@@ -35,31 +36,58 @@ function ensureDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-function httpGet(url, headers = {}) {
+function httpGet(url, headers = {}, signal) {
+  throwIfAborted(signal);
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', ...headers } }, (res) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', ...headers } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return httpGet(res.headers.location, headers).then(resolve).catch(reject);
+        cleanup();
+        return httpGet(res.headers.location, headers, signal).then(resolve).catch(reject);
       }
       let data = '';
       res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve(data));
-    }).on('error', reject);
+      res.on('end', () => {
+        cleanup();
+        resolve(data);
+      });
+    });
+
+    const cleanup = onAbort(signal, () => {
+      req.destroy(createAbortError());
+    });
+    req.on('error', (err) => {
+      cleanup();
+      reject(err);
+    });
   });
 }
 
-function downloadFile(url, dest, headers = {}) {
+function downloadFile(url, dest, headers = {}, signal) {
+  throwIfAborted(signal);
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
-    https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', ...headers } }, (res) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', ...headers } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        cleanup();
         file.close();
         try { fs.unlinkSync(dest); } catch {}
-        return downloadFile(res.headers.location, dest, headers).then(resolve).catch(reject);
+        return downloadFile(res.headers.location, dest, headers, signal).then(resolve).catch(reject);
       }
       res.pipe(file);
-      file.on('finish', () => { file.close(); resolve(); });
-    }).on('error', (err) => {
+      file.on('finish', () => {
+        cleanup();
+        file.close();
+        resolve();
+      });
+    });
+
+    const cleanup = onAbort(signal, () => {
+      req.destroy(createAbortError());
+      file.close();
+      try { fs.unlinkSync(dest); } catch {}
+    });
+    req.on('error', (err) => {
+      cleanup();
       try { fs.unlinkSync(dest); } catch {}
       reject(err);
     });
@@ -72,14 +100,15 @@ class FontManager {
     ensureDir(TTF_DIR);
   }
 
-  async ensureFonts(onProgress) {
+  async ensureFonts(onProgress, signal) {
     for (const [name, cfg] of Object.entries(FONT_FAMILIES)) {
+      throwIfAborted(signal);
       const cssPath = path.join(DATA_DIR, `${name.replace(/\s+/g, '_')}.css`);
       if (fs.existsSync(cssPath)) continue;
 
       onProgress?.(`Downloading font: ${name}…`);
       const cssUrl = FONT_CSS_URL(cfg.urlName, cfg.weights);
-      const cssText = await httpGet(cssUrl);
+      const cssText = await httpGet(cssUrl, {}, signal);
 
       // Parse @font-face blocks and download woff2 files
       const fontFaceRegex = /@font-face\s*{([^}]+)}/g;
@@ -98,7 +127,7 @@ class FontManager {
         const localPath = path.join(DATA_DIR, localName);
 
         if (!fs.existsSync(localPath)) {
-          await downloadFile(remoteUrl, localPath);
+          await downloadFile(remoteUrl, localPath, {}, signal);
         }
 
         // Replace URL in block with local file path (file:// protocol)
@@ -121,15 +150,16 @@ class FontManager {
    *  - on failure (no network etc.), returns false; caller should fallback to a
    *    system font in the ASS style.
    */
-  async ensureTtfFonts(onProgress) {
+  async ensureTtfFonts(onProgress, signal) {
     try {
       for (const [name, cfg] of Object.entries(FONT_FAMILIES)) {
+        throwIfAborted(signal);
         const safeName = name.replace(/\s+/g, '_');
         const marker = path.join(TTF_DIR, `.${safeName}.ok`);
         if (fs.existsSync(marker)) continue;
         onProgress?.(`Downloading TTF font: ${name}…`);
         const cssUrl = FONT_CSS_URL(cfg.urlName, cfg.weights);
-        const cssText = await httpGet(cssUrl, { 'User-Agent': TTF_UA });
+        const cssText = await httpGet(cssUrl, { 'User-Agent': TTF_UA }, signal);
 
         const fontFaceRegex = /@font-face\s*{([^}]+)}/g;
         let m, idx = 0, downloaded = 0;
@@ -144,7 +174,7 @@ class FontManager {
           const localPath = path.join(TTF_DIR, localName);
           if (!fs.existsSync(localPath)) {
             try {
-              await downloadFile(remoteUrl, localPath, { 'User-Agent': TTF_UA });
+              await downloadFile(remoteUrl, localPath, { 'User-Agent': TTF_UA }, signal);
               downloaded++;
             } catch (e) {
               onProgress?.(`Font ${name} download failed: ${e.message}`);
@@ -160,6 +190,7 @@ class FontManager {
       }
       return true;
     } catch (err) {
+      if (isAbortError(err)) throw err;
       onProgress?.(`TTF fonts not available: ${err.message}`);
       return false;
     }

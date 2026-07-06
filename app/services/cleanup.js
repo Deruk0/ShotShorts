@@ -36,6 +36,12 @@ function runCleanup() {
     } else {
       console.log(`[ShotShorts Cleanup] No temporary files found to clean up.`);
     }
+
+    const subtitleTmpDir = path.join(tmpDir, 'shotshorts_subtitles');
+    if (fs.existsSync(subtitleTmpDir)) {
+      fs.rmSync(subtitleTmpDir, { recursive: true, force: true });
+      console.log('[ShotShorts Cleanup] Removed temporary subtitle render directory.');
+    }
   } catch (err) {
     console.error('[ShotShorts Cleanup] Error during cleanup:', err);
   }

@@ -2,6 +2,7 @@ const axios = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const { normalizeGroqApiKeys, pickAvailableGroqKey, setGroqKeyCooldown } = require('./groq-key-utils');
+const { abortableSleep, isAbortError, throwIfAborted } = require('./cancellation');
 
 const GROQ_QWEN_MODEL = 'qwen/qwen3.6-27b';
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -33,17 +34,14 @@ function buildProxyAgent(proxy) {
   return new HttpsProxyAgent(url);
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForGroqChatKey(apiKeys, onProgress, label = 'Qwen') {
+async function waitForGroqChatKey(apiKeys, onProgress, label = 'Qwen', signal) {
   const normalizedKeys = normalizeGroqApiKeys(apiKeys);
   if (!normalizedKeys.length) {
     throw new Error('Groq API keys not set. Add at least one in Settings.');
   }
 
   while (true) {
+    throwIfAborted(signal);
     const selected = pickAvailableGroqKey(normalizedKeys, groqChatKeyCooldowns, groqChatKeyCursor);
     if (selected.apiKey) {
       return selected;
@@ -51,7 +49,7 @@ async function waitForGroqChatKey(apiKeys, onProgress, label = 'Qwen') {
 
     const waitMs = Math.max(1000, selected.waitMs || DEFAULT_RATE_LIMIT_DELAY_MS);
     onProgress?.(`${label}: all Groq Qwen keys are cooling down. Waiting ${Math.ceil(waitMs / 1000)}s…`);
-    await sleep(waitMs);
+    await abortableSleep(waitMs, signal);
   }
 }
 
@@ -222,9 +220,10 @@ class GroqStoryAnalyzer {
     this.proxy = proxy || null;
   }
 
-  _buildAxiosConfig() {
+  _buildAxiosConfig(signal) {
     const config = {
-      timeout: 180000
+      timeout: 180000,
+      signal
     };
     const agent = buildProxyAgent(this.proxy);
     if (agent) {
@@ -356,7 +355,8 @@ class GroqStoryAnalyzer {
     ].join('\n');
   }
 
-  async _requestWindow(apiKey, prompt, reasoningEffort = 'none') {
+  async _requestWindow(apiKey, prompt, reasoningEffort = 'none', signal) {
+    throwIfAborted(signal);
     const payload = {
       model: GROQ_QWEN_MODEL,
       messages: [
@@ -374,7 +374,7 @@ class GroqStoryAnalyzer {
     };
 
     const response = await axios.post(GROQ_CHAT_URL, payload, {
-      ...this._buildAxiosConfig(),
+      ...this._buildAxiosConfig(signal),
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
@@ -399,7 +399,7 @@ class GroqStoryAnalyzer {
     return parsed;
   }
 
-  async _requestWindowWithRetry(prompt, onProgress, label) {
+  async _requestWindowWithRetry(prompt, onProgress, label, signal) {
     let lastErr = null;
     const efforts = ['none', 'default'];
 
@@ -409,15 +409,17 @@ class GroqStoryAnalyzer {
       let transientRetries = 0;
 
       while (true) {
-        const selectedKey = await waitForGroqChatKey(this.apiKeys, onProgress, label);
+        throwIfAborted(signal);
+        const selectedKey = await waitForGroqChatKey(this.apiKeys, onProgress, label, signal);
 
         try {
           if (pass > 0) {
             onProgress?.(`${label}: retrying with deeper reasoning…`);
           }
-          return await this._requestWindow(selectedKey.apiKey, prompt, reasoningEffort);
+          return await this._requestWindow(selectedKey.apiKey, prompt, reasoningEffort, signal);
         } catch (err) {
           lastErr = err;
+          if (isAbortError(err)) throw err;
           if (isPayloadTooLargeError(err)) {
             break;
           }
@@ -437,7 +439,7 @@ class GroqStoryAnalyzer {
             const delayMs = Math.min(2000 * Math.pow(2, transientRetries), 10000);
             transientRetries++;
             onProgress?.(`${label}: transient Groq error, retrying in ${Math.round(delayMs / 1000)}s…`);
-            await sleep(delayMs);
+            await abortableSleep(delayMs, signal);
             continue;
           }
 
@@ -479,10 +481,11 @@ class GroqStoryAnalyzer {
     ];
   }
 
-  async _analyzeWindow(window, totalDuration, onProgress, label) {
+  async _analyzeWindow(window, totalDuration, onProgress, label, signal) {
+    throwIfAborted(signal);
     const prompt = this._buildPrompt(window, totalDuration);
     try {
-      const parsed = await this._requestWindowWithRetry(prompt, onProgress, label);
+      const parsed = await this._requestWindowWithRetry(prompt, onProgress, label, signal);
       return this._sanitizeWindowStories(parsed.stories, window, totalDuration);
     } catch (err) {
       if (!isPayloadTooLargeError(err)) throw err;
@@ -493,8 +496,8 @@ class GroqStoryAnalyzer {
       }
 
       onProgress?.(`${label}: request too large for Qwen, splitting into smaller windows…`);
-      const leftStories = await this._analyzeWindow(split[0], totalDuration, onProgress, `${label}.A`);
-      const rightStories = await this._analyzeWindow(split[1], totalDuration, onProgress, `${label}.B`);
+      const leftStories = await this._analyzeWindow(split[0], totalDuration, onProgress, `${label}.A`, signal);
+      const rightStories = await this._analyzeWindow(split[1], totalDuration, onProgress, `${label}.B`, signal);
       return [...leftStories, ...rightStories];
     }
   }
@@ -563,7 +566,10 @@ class GroqStoryAnalyzer {
     }));
   }
 
-  async analyzeTranscript(transcriptSegments, totalDuration, onProgress) {
+  async analyzeTranscript(transcriptSegments, totalDuration, onProgress, options = {}) {
+    const signal = options.signal;
+    throwIfAborted(signal);
+
     if (!this.apiKeys.length) {
       throw new Error('Groq API keys not set. Add at least one in Settings.');
     }
@@ -579,10 +585,11 @@ class GroqStoryAnalyzer {
 
     const rawStories = [];
     for (let i = 0; i < windows.length; i++) {
+      throwIfAborted(signal);
       const window = windows[i];
       const label = `Qwen window ${i + 1}/${windows.length}`;
       onProgress?.(`${label}: analyzing transcript…`);
-      const cleanedStories = await this._analyzeWindow(window, totalDuration, onProgress, label);
+      const cleanedStories = await this._analyzeWindow(window, totalDuration, onProgress, label, signal);
       onProgress?.(`${label}: found ${cleanedStories.length} story start(s).`);
       rawStories.push(...cleanedStories);
     }
