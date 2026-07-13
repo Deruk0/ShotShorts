@@ -127,8 +127,10 @@ class SubtitleRenderer {
         headless: true,
         timeout: 30000,
       });
-      this.page = await this.browser.newPage();
-      await this.page.setViewportSize({ width: 1080, height: 1920 });
+      this.page = await this.browser.newPage({
+        viewport: { width: 1080, height: 1920 },
+        deviceScaleFactor: 1
+      });
       onProgress?.('Chromium ready ✓');
     } catch (err) {
       throw new Error(`Failed to launch Chromium: ${err.message}`);
@@ -513,6 +515,7 @@ html, body {
       ffmpeg()
         .input(listPath)
         .inputOptions(['-f', 'concat', '-safe', '0'])
+        .videoFilters('format=yuva420p')
         .outputOptions([
           '-c:v', 'libvpx-vp9',
           '-pix_fmt', 'yuva420p',

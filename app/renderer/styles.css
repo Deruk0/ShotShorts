@@ -46,8 +46,8 @@
   --accent-hover: #d97706;
   --bolt: #d97706;
   --bolt-glow: rgba(245, 158, 11, 0.45);
-  --danger: #c2410c;
-  --danger-hover: #9a3412;
+  --danger: #d9383a;
+  --danger-hover: #b91c1c;
   --success: #15803d;
 }
 
@@ -66,8 +66,8 @@
   --accent-hover: #dd9418;
   --bolt: #f0a500;
   --bolt-glow: rgba(244, 182, 63, 0.48);
-  --danger: #b85f1b;
-  --danger-hover: #94420d;
+  --danger: #e23b3b;
+  --danger-hover: #b71c1c;
   --success: #66810f;
 }
 
@@ -146,8 +146,8 @@
   --accent-hover: #f43f9f;
   --bolt: #ff9ee6;
   --bolt-glow: rgba(255, 102, 196, 0.65);
-  --danger: #f97316;
-  --danger-hover: #ea580c;
+  --danger: #df1c54;
+  --danger-hover: #b80d3b;
   --success: #facc15;
 }
 

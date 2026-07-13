@@ -529,6 +529,7 @@ function syncSettingsToControls() {
   $('#proxy-toggle').checked = hasProxy;
   $('#proxy-fields').style.opacity = hasProxy ? '1' : '0.4';
   $('#proxy-fields').style.pointerEvents = hasProxy ? 'auto' : 'none';
+  setContainerControlsDisabled('#proxy-fields', !hasProxy);
   $('#proxy-type').value = settings.proxy?.type || 'http';
   $('#proxy-host').value = settings.proxy?.host || '';
   $('#proxy-port').value = settings.proxy?.port || '';
@@ -561,6 +562,7 @@ function syncSettingsToControls() {
           : ['highlight']);
   setSelectedKaraokeEffects(savedEffects);
   $('#subtitle-case').value = settings.subtitleCase || 'sentence';
+  updateKaraokeFieldsState();
 
   renderKeys();
   renderPresets();
@@ -810,6 +812,7 @@ $('#proxy-toggle').addEventListener('change', () => {
   const on = $('#proxy-toggle').checked;
   $('#proxy-fields').style.opacity = on ? '1' : '0.4';
   $('#proxy-fields').style.pointerEvents = on ? 'auto' : 'none';
+  setContainerControlsDisabled('#proxy-fields', !on);
   updateProxySettings();
 });
 
@@ -859,17 +862,47 @@ function syncSubtitleStyleFontSize() {
 }
 
 // ===== SETTINGS: SUBTITLES =====
+function setContainerControlsDisabled(containerId, disabled) {
+  const container = $(containerId);
+  if (!container) return;
+  container.querySelectorAll('input, select, button').forEach(el => {
+    if (containerId === '#subtitle-fields' && !disabled) {
+      if (el.closest('#subtitle-karaoke-modes') || el.id === 'karaoke-mode-highlight' || el.id === 'karaoke-mode-box' || el.id === 'karaoke-mode-caps') {
+        return;
+      }
+    }
+    el.disabled = disabled;
+  });
+}
+
+function updateKaraokeFieldsState() {
+  const subsEnabled = !!$('#subtitles-toggle').checked;
+  const karaokeEnabled = !!$('#subtitle-karaoke').checked;
+  const on = subsEnabled && karaokeEnabled;
+  
+  const karaokeLeft = $('.karaoke-left');
+  if (karaokeLeft) {
+    karaokeLeft.style.opacity = on ? '1' : '0.4';
+    karaokeLeft.style.pointerEvents = on ? 'auto' : 'none';
+  }
+  $$('#subtitle-karaoke-modes input').forEach(input => {
+    input.disabled = !on;
+  });
+}
+
 function setSubtitleFieldsExpanded(on) {
   const fields = $('#subtitle-fields');
   if (!fields) return;
   fields.style.display = '';
   fields.style.opacity = on ? '1' : '0.4';
   fields.style.pointerEvents = on ? 'auto' : 'none';
+  setContainerControlsDisabled('#subtitle-fields', !on);
 }
 
 $('#subtitles-toggle').addEventListener('change', () => {
   const on = $('#subtitles-toggle').checked;
   setSubtitleFieldsExpanded(on);
+  updateKaraokeFieldsState();
   settings.subtitlesEnabled = on;
   settings.subtitleStyle = $('#subtitle-style').value;
   settings.subtitleModel = $('#subtitle-model').value;
@@ -924,6 +957,7 @@ $('#subtitle-offset').addEventListener('input', () => {
   saveSettings();
 });
 $('#subtitle-karaoke').addEventListener('change', () => {
+  updateKaraokeFieldsState();
   settings.subtitleKaraoke = !!$('#subtitle-karaoke').checked;
   settings.subtitleKaraokeEffects = getSelectedKaraokeEffects();
   settings.subtitleKaraokeMode = legacyModeFromEffects(settings.subtitleKaraokeEffects);
