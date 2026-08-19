@@ -104,7 +104,11 @@ const PRESET_SETTING_KEYS = [
   'appTheme'
 ];
 
-const APP_THEMES = ['dark', 'light', 'milk', 'electric', 'sunset', 'lagoon', 'berry'];
+const APP_THEMES = [
+  'dark', 'light', 'copper', 'clay', 'forest', 'wine', 'violet',
+  'coral', 'midnight', 'rose', 'lime', 'signal', 'apricot',
+  'milk', 'electric', 'sunset', 'lagoon', 'berry'
+];
 
 function normalizeTheme(theme) {
   return APP_THEMES.includes(theme) ? theme : 'dark';
@@ -182,7 +186,7 @@ function updateActivePresetSnapshot() {
 
 const I18N = {
   en: {
-    tabs: { generator: 'Generator', settings: '⚙ Settings' },
+    tabs: { generator: 'Generator', settings: 'Settings' },
     status: { ready: 'Ready', processing: 'Processing…', done: 'Complete', error: 'Error', idle: 'Ready' },
     buttons: { generate: 'Generate Videos', cancel: 'Cancel', add: 'Add', createPreset: 'Create', savePreset: 'Save Current', deletePreset: 'Delete Preset', resetStats: 'Reset Statistics' },
     warnings: { noKeys: 'Add at least one Groq API key in Settings before generating.' },
@@ -196,8 +200,21 @@ const I18N = {
       appLangTitle: 'App Language',
       interfaceLangLabel: 'Interface Language',
       themeLabel: 'Color Theme',
+      themeCurrentGroup: 'Current palettes',
+      themeClassicGroup: 'Classic palettes',
       themeDark: 'Graphite',
       themeLight: 'Paper',
+      themeCopper: 'Copper Night',
+      themeClay: 'Terracotta',
+      themeForest: 'Forest Linen',
+      themeWine: 'Wine Blush',
+      themeViolet: 'Violet Ink',
+      themeCoral: 'Coral Reef',
+      themeMidnight: 'Night Slate',
+      themeRose: 'Raspberry Silk',
+      themeLime: 'Carbon Lime',
+      themeSignal: 'Signal Steel',
+      themeApricot: 'Peach Amethyst',
       themeMilk: 'Vanilla',
       themeElectric: 'Electric Lime',
       themeSunset: 'Sunset Pop',
@@ -247,7 +264,7 @@ const I18N = {
     }
   },
   ru: {
-    tabs: { generator: 'Генератор', settings: '⚙ Настройки' },
+    tabs: { generator: 'Генератор', settings: 'Настройки' },
     status: { ready: 'Готово', processing: 'Обработка…', done: 'Завершено', error: 'Ошибка', idle: 'Готово' },
     buttons: { generate: 'Создать видео', cancel: 'Отмена', add: 'Добавить', createPreset: 'Создать', savePreset: 'Сохранить текущие', deletePreset: 'Удалить пресет', resetStats: 'Сбросить статистику' },
     warnings: { noKeys: 'Добавь хотя бы один Groq API ключ во вкладке настроек перед запуском.' },
@@ -261,8 +278,21 @@ const I18N = {
       appLangTitle: 'Язык приложения',
       interfaceLangLabel: 'Язык интерфейса',
       themeLabel: 'Цветовая тема',
+      themeCurrentGroup: 'Текущие палитры',
+      themeClassicGroup: 'Классические палитры',
       themeDark: 'Графит',
       themeLight: 'Бумага',
+      themeCopper: 'Медная ночь',
+      themeClay: 'Терракота',
+      themeForest: 'Лесной лён',
+      themeWine: 'Винный румянец',
+      themeViolet: 'Фиолетовые чернила',
+      themeCoral: 'Коралловый риф',
+      themeMidnight: 'Ночной сланец',
+      themeRose: 'Малиновый шёлк',
+      themeLime: 'Карбон-лайм',
+      themeSignal: 'Сигнальная сталь',
+      themeApricot: 'Персиковый аметист',
       themeMilk: 'Ваниль',
       themeElectric: 'Электро-лайм',
       themeSunset: 'Закатный поп',
@@ -318,21 +348,13 @@ function t(path) {
   return path.split('.').reduce((acc, k) => (acc && acc[k] !== undefined ? acc[k] : null), langPack) ?? path;
 }
 
-function setLightningLabel(el, text, { bothSides = false } = {}) {
-  if (!el) return;
-  const safeText = String(text || '');
-  el.innerHTML = bothSides
-    ? `<span class="theme-bolt">ϟ</span> ${safeText} <span class="theme-bolt">ϟ</span>`
-    : `<span class="theme-bolt">ϟ</span> ${safeText}`;
-}
-
 function applyTranslations() {
   const tabs = $$('.nav-tab');
-  if (tabs[0]) setLightningLabel(tabs[0], t('tabs.generator'));
+  if (tabs[0]) tabs[0].textContent = t('tabs.generator');
   if (tabs[1]) tabs[1].textContent = t('tabs.settings');
   const st = $('#status-text');
   if (st && (!st.textContent || st.textContent === 'Ready' || st.textContent === 'Готово')) st.textContent = t('status.ready');
-  setLightningLabel($('#btn-generate'), t('buttons.generate'), { bothSides: true });
+  $('#btn-generate').textContent = t('buttons.generate');
   $('#btn-cancel').textContent = t('buttons.cancel');
   $('#btn-add-key').textContent = t('buttons.add');
   $('#btn-create-preset').textContent = t('buttons.createPreset');
@@ -346,11 +368,24 @@ function applyTranslations() {
   const alTitle = $('#txt-app-lang-title'); if (alTitle) alTitle.textContent = t('labels.appLangTitle');
   const alLabel = $('#txt-interface-lang-label'); if (alLabel) alLabel.textContent = t('labels.interfaceLangLabel');
   const themeLabel = $('#txt-theme-label'); if (themeLabel) themeLabel.textContent = t('labels.themeLabel');
+  const currentThemeGroup = $('#app-theme-current-group'); if (currentThemeGroup) currentThemeGroup.label = t('labels.themeCurrentGroup');
+  const classicThemeGroup = $('#app-theme-classic-group'); if (classicThemeGroup) classicThemeGroup.label = t('labels.themeClassicGroup');
   const themeSelect = $('#app-theme');
   if (themeSelect) {
     const themeNames = {
       dark: t('labels.themeDark'),
       light: t('labels.themeLight'),
+      copper: t('labels.themeCopper'),
+      clay: t('labels.themeClay'),
+      forest: t('labels.themeForest'),
+      wine: t('labels.themeWine'),
+      violet: t('labels.themeViolet'),
+      coral: t('labels.themeCoral'),
+      midnight: t('labels.themeMidnight'),
+      rose: t('labels.themeRose'),
+      lime: t('labels.themeLime'),
+      signal: t('labels.themeSignal'),
+      apricot: t('labels.themeApricot'),
       milk: t('labels.themeMilk'),
       electric: t('labels.themeElectric'),
       sunset: t('labels.themeSunset'),
@@ -407,6 +442,7 @@ function applyTranslations() {
   renderPresets();
   updateKeyCount();
   updateSubtitlePreview();
+  window.SharpSelect?.refreshAll();
 }
 
 async function loadSettings() {
@@ -569,6 +605,7 @@ function syncSettingsToControls() {
   syncPathLabels();
   updateGenerateBtn();
   updateSubtitlePreview();
+  window.SharpSelect?.refreshAll();
 }
 
 function renderPresets() {
@@ -606,6 +643,7 @@ function renderPresets() {
   const hasActive = !!settings.activePresetId;
   $('#btn-save-preset').disabled = !hasActive || isProcessing;
   $('#btn-delete-preset').disabled = !hasActive || isProcessing;
+  window.SharpSelect?.refresh(select);
 }
 
 async function createPreset() {
@@ -873,6 +911,7 @@ function setContainerControlsDisabled(containerId, disabled) {
     }
     el.disabled = disabled;
   });
+  window.SharpSelect?.refresh(container);
 }
 
 function updateKaraokeFieldsState() {
@@ -1132,7 +1171,11 @@ function setControlsDisabled(disabled) {
   if (!disabled) {
     $('#btn-create-preset').disabled = !$('#preset-name-input').value.trim();
     renderPresets();
+    setContainerControlsDisabled('#proxy-fields', !$('#proxy-toggle').checked);
+    setContainerControlsDisabled('#subtitle-fields', !$('#subtitles-toggle').checked);
+    updateKaraokeFieldsState();
   }
+  window.SharpSelect?.refreshAll();
 }
 
 function setStatus(state, text) {
@@ -1433,6 +1476,8 @@ async function init() {
   }
   syncSettingsToControls();
   applyTranslations();
+  window.SharpSelect?.mountAll();
+  window.SharpSelect?.refreshAll();
   // Recompute preview scale on window resize so the 1080x1920 frame keeps
   // fitting the available stage width.
   let __subPreviewResizeRaf = 0;
@@ -1452,25 +1497,7 @@ async function init() {
 
 init();
 
-// ===== GLITCH TITLE ANIMATION =====
-const glitchTitle = document.querySelector('.titlebar-label');
-const prefixText = 'PROGRAM';
-const glitchChars = '!@#$%^&*()_+-=[]{}|;:,.<>?/~`';
-
-let glitchInterval = setInterval(() => {
-  let glitchedSuffix = '';
-  const len = Math.floor(Math.random() * 4) + 5; 
-  for (let i = 0; i < len; i++) {
-    glitchedSuffix += glitchChars[Math.floor(Math.random() * glitchChars.length)];
-  }
-  glitchTitle.innerHTML = `<span class="dot"></span> ${prefixText} ${glitchedSuffix}`;
-}, 60);
-
 window.addEventListener('beforeunload', () => {
-  if (glitchInterval) {
-    clearInterval(glitchInterval);
-    glitchInterval = null;
-  }
   if (subtitlePreviewInterval) {
     clearInterval(subtitlePreviewInterval);
     subtitlePreviewInterval = null;

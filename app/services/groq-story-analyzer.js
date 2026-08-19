@@ -132,11 +132,37 @@ function isRateLimitError(err) {
   return err?.response?.status === 429;
 }
 
+function isJsonGenerationError(err) {
+  if (err?.code === 'INVALID_MODEL_JSON') return true;
+  if (err?.response?.status !== 400) return false;
+  const text = getErrorText(err);
+  return /json_validate_failed|failed to validate json|generated json|failed_generation/i.test(text);
+}
+
 function normalizeText(text) {
   return String(text || '')
     .replace(/\r?\n/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function endsWithSentenceBoundary(text) {
+  return /[.!?…][\"'»”)]*$/.test(normalizeText(text));
+}
+
+function asBoolean(value, fallback = false) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    if (/^(true|yes|1)$/i.test(value.trim())) return true;
+    if (/^(false|no|0)$/i.test(value.trim())) return false;
+  }
+  return fallback;
+}
+
+function clampConfidence(value, fallback = 0.5) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(1, Math.max(0, numeric));
 }
 
 function formatTimecode(seconds) {
@@ -214,6 +240,9 @@ class GroqStoryAnalyzer {
   static MAX_WINDOW_BLOCKS = 70;
   static WINDOW_OVERLAP_BLOCKS = 6;
   static MIN_SPLITTABLE_CORE_BLOCKS = 10;
+  static REFINEMENT_CONTEXT_BLOCKS = 12;
+  static REFINEMENT_LOOKAHEAD_BLOCKS = 24;
+  static MAX_REFINEMENT_BLOCKS = 64;
 
   constructor(apiKeys, proxy) {
     this.apiKeys = normalizeGroqApiKeys(apiKeys);
@@ -268,6 +297,7 @@ class GroqStoryAnalyzer {
       const nextDuration = end - current.start;
       const shouldSplit =
         gap > GroqStoryAnalyzer.MAX_BLOCK_GAP_SEC ||
+        endsWithSentenceBoundary(current.text) ||
         nextText.length > GroqStoryAnalyzer.MAX_BLOCK_CHARS ||
         nextDuration > GroqStoryAnalyzer.MAX_BLOCK_DURATION_SEC;
 
@@ -336,17 +366,24 @@ class GroqStoryAnalyzer {
     const lastCoreEnd = window.blocks[window.coreEnd - window.windowStart]?.end || totalDuration;
 
     return [
-      'Split this spoken transcript into stories.',
+      'Find complete, self-contained stories in this spoken transcript.',
+      'A story begins at the earliest block needed to understand who/what is being discussed and the setup or premise.',
+      'A story ends only after its outcome, answer, punchline, conclusion, or final consequence. Topic changes and unrelated examples belong to another story.',
       'Return JSON only:',
-      '{"stories":[{"title":"Короткий заголовок","start":0.0,"end":0.0}]}',
+      '{"stories":[{"title":"Короткий заголовок","start_block_id":1,"end_block_id":4,"has_setup":true,"has_resolution":true,"starts_mid_thought":false,"ends_mid_thought":false,"confidence":0.9,"end_may_continue":false}]}',
       'Rules:',
       '- title in Russian, 2-4 words',
       '- chronological order',
       '- do not skip stories',
       '- do not merge unrelated stories',
+      '- boundaries MUST be integer block ids printed at the start of transcript lines; never invent timestamps',
+      '- include setup/context at the start; never begin on a pronoun, answer, consequence, or continuation that depends on omitted speech',
+      '- include the resolution at the end; never stop on an unfinished sentence, unanswered question, setup without payoff, or transition into the conclusion',
+      '- short but complete stories are valid; do not extend them merely to reach a target duration',
+      '- if the visible transcript ends before the resolution, set end_may_continue=true and use the last relevant visible block as end_block_id',
       '- use overlap blocks only as context',
       `- emit only stories whose START is inside core block ids ${String(coreStartId).padStart(3, '0')}..${String(coreEndId).padStart(3, '0')}`,
-      `- if story start is before ${firstCoreStart.toFixed(2)} sec, omit it`,
+      `- if the story starts before block ${String(coreStartId).padStart(3, '0')} (${firstCoreStart.toFixed(2)} sec), omit it`,
       '- if no story starts in core range, return {"stories":[]}',
       `- recording duration ${totalDuration.toFixed(2)} sec`,
       `- visible core end about ${lastCoreEnd.toFixed(2)} sec`,
@@ -355,8 +392,9 @@ class GroqStoryAnalyzer {
     ].join('\n');
   }
 
-  async _requestWindow(apiKey, prompt, reasoningEffort = 'none', signal) {
+  async _requestWindow(apiKey, prompt, reasoningEffort = 'default', signal, requestOptions = {}) {
     throwIfAborted(signal);
+    const useJsonMode = requestOptions.useJsonMode !== false;
     const payload = {
       model: GROQ_QWEN_MODEL,
       messages: [
@@ -365,13 +403,13 @@ class GroqStoryAnalyzer {
           content: prompt
         }
       ],
-      response_format: { type: 'json_object' },
       reasoning_format: 'hidden',
       reasoning_effort: reasoningEffort,
       temperature: 0.2,
       top_p: 0.9,
-      max_completion_tokens: 2048
+      max_completion_tokens: Math.max(2048, Number(requestOptions.maxCompletionTokens) || 4096)
     };
+    if (useJsonMode) payload.response_format = { type: 'json_object' };
 
     const response = await axios.post(GROQ_CHAT_URL, payload, {
       ...this._buildAxiosConfig(signal),
@@ -394,17 +432,24 @@ class GroqStoryAnalyzer {
     const content = response?.data?.choices?.[0]?.message?.content || '';
     const parsed = extractJsonObject(content);
     if (!parsed) {
-      throw new Error('Groq Qwen returned invalid JSON');
+      const err = new Error('Groq Qwen returned invalid JSON');
+      err.code = 'INVALID_MODEL_JSON';
+      err.failedGeneration = content.slice(0, 500);
+      throw err;
     }
     return parsed;
   }
 
   async _requestWindowWithRetry(prompt, onProgress, label, signal) {
     let lastErr = null;
-    const efforts = ['none', 'default'];
+    const attempts = [
+      { reasoningEffort: 'default', useJsonMode: true, description: 'reasoning + JSON mode' },
+      { reasoningEffort: 'none', useJsonMode: true, description: 'non-reasoning JSON mode' },
+      { reasoningEffort: 'none', useJsonMode: false, description: 'local JSON recovery' }
+    ];
 
-    for (let pass = 0; pass < efforts.length; pass++) {
-      const reasoningEffort = efforts[pass];
+    for (let pass = 0; pass < attempts.length; pass++) {
+      const attempt = attempts[pass];
       let rateLimitRetries = 0;
       let transientRetries = 0;
 
@@ -414,14 +459,28 @@ class GroqStoryAnalyzer {
 
         try {
           if (pass > 0) {
-            onProgress?.(`${label}: retrying with deeper reasoning…`);
+            onProgress?.(`${label}: retrying with ${attempt.description}…`);
           }
-          return await this._requestWindow(selectedKey.apiKey, prompt, reasoningEffort, signal);
+          return await this._requestWindow(
+            selectedKey.apiKey,
+            prompt,
+            attempt.reasoningEffort,
+            signal,
+            { useJsonMode: attempt.useJsonMode, maxCompletionTokens: 4096 }
+          );
         } catch (err) {
           lastErr = err;
           if (isAbortError(err)) throw err;
           if (isPayloadTooLargeError(err)) {
-            break;
+            throw err;
+          }
+
+          if (isJsonGenerationError(err)) {
+            if (pass < attempts.length - 1) {
+              onProgress?.(`${label}: Groq produced invalid JSON; switching recovery mode…`);
+              break;
+            }
+            throw err;
           }
 
           if (isRateLimitError(err)) {
@@ -443,7 +502,7 @@ class GroqStoryAnalyzer {
             continue;
           }
 
-          break;
+          throw err;
         }
       }
     }
@@ -504,26 +563,69 @@ class GroqStoryAnalyzer {
 
   _sanitizeWindowStories(rawStories, window, totalDuration) {
     const stories = Array.isArray(rawStories) ? rawStories : [];
+    const visibleIds = new Set(window.blocks.map((block) => block.id));
     const coreFirst = window.blocks[window.coreStart - window.windowStart];
     const coreLast = window.blocks[window.coreEnd - window.windowStart];
-    const coreStartSec = coreFirst ? coreFirst.start : 0;
-    const coreEndSec = coreLast ? coreLast.end : totalDuration;
+    const coreStartId = coreFirst?.id || 1;
+    const coreEndId = coreLast?.id || this._allBlocks.length;
 
     return stories
       .map((story) => {
         const title = normalizeText(story?.title).slice(0, 80);
-        const start = Math.max(0, Number(story?.start) || 0);
-        const end = Math.min(totalDuration, Number(story?.end) || 0);
-        return { title, start, end };
+        const startBlockId = this._resolveBlockId(story?.start_block_id, story?.start, 'start');
+        const endBlockId = this._resolveBlockId(story?.end_block_id, story?.end, 'end');
+        const startBlock = this._allBlocks[startBlockId - 1];
+        const endBlock = this._allBlocks[endBlockId - 1];
+        const endMayContinue = asBoolean(story?.end_may_continue, false);
+        return {
+          title,
+          startBlockId,
+          endBlockId,
+          start: startBlock?.start,
+          end: Math.min(totalDuration, endBlock?.end ?? totalDuration),
+          hasSetup: asBoolean(story?.has_setup, true),
+          hasResolution: asBoolean(story?.has_resolution, !endMayContinue),
+          startsMidThought: asBoolean(story?.starts_mid_thought, false),
+          endsMidThought: asBoolean(story?.ends_mid_thought, false),
+          confidence: clampConfidence(story?.confidence),
+          endMayContinue
+        };
       })
-      .filter((story) => story.title && Number.isFinite(story.start) && Number.isFinite(story.end))
+      .filter((story) => story.title && Number.isInteger(story.startBlockId) && Number.isInteger(story.endBlockId))
+      .filter((story) => visibleIds.has(story.startBlockId) && visibleIds.has(story.endBlockId))
+      .filter((story) => story.endBlockId >= story.startBlockId)
+      .filter((story) => Number.isFinite(story.start) && Number.isFinite(story.end))
       .filter((story) => story.end - story.start >= 1)
-      .filter((story) => story.start >= coreStartSec - 0.75 && story.start <= coreEndSec + 0.75);
+      .filter((story) => story.startBlockId >= coreStartId && story.startBlockId <= coreEndId);
+  }
+
+  _resolveBlockId(rawBlockId, rawTime, edge) {
+    const maxId = this._allBlocks.length;
+    const numericId = Number(rawBlockId);
+    if (Number.isInteger(numericId) && numericId >= 1 && numericId <= maxId) {
+      return numericId;
+    }
+
+    // Backward-compatible fallback for a model that ignores the schema once.
+    const numericTime = Number(rawTime);
+    if (!Number.isFinite(numericTime) || maxId === 0) return -1;
+    let best = this._allBlocks[0];
+    let bestDistance = Infinity;
+    for (const block of this._allBlocks) {
+      const anchor = edge === 'end' ? block.end : block.start;
+      const distance = Math.abs(anchor - numericTime);
+      if (distance < bestDistance) {
+        best = block;
+        bestDistance = distance;
+      }
+    }
+    return best.id;
   }
 
   _mergeStories(stories, totalDuration) {
     const sorted = [...stories]
       .map((story) => ({
+        ...story,
         title: normalizeText(story.title),
         start: Math.max(0, Number(story.start) || 0),
         end: Math.min(totalDuration, Number(story.end) || 0)
@@ -545,13 +647,25 @@ class GroqStoryAnalyzer {
         titleSimilarity(story.title, prev.title) >= 0.5;
 
       if (sameWindowDuplicate) {
-        if (story.end > prev.end) prev.end = story.end;
+        if (story.end > prev.end) {
+          prev.end = story.end;
+          prev.endBlockId = story.endBlockId;
+          prev.hasResolution = story.hasResolution;
+          prev.endsMidThought = story.endsMidThought;
+          prev.endMayContinue = story.endMayContinue;
+        }
         if (story.title.length > prev.title.length) prev.title = story.title;
+        prev.confidence = Math.max(prev.confidence || 0, story.confidence || 0);
         continue;
       }
 
       if (story.start < prev.end && story.end > prev.end && titleSimilarity(story.title, prev.title) >= 0.6) {
         prev.end = story.end;
+        prev.endBlockId = story.endBlockId;
+        prev.hasResolution = story.hasResolution;
+        prev.endsMidThought = story.endsMidThought;
+        prev.endMayContinue = story.endMayContinue;
+        prev.confidence = Math.max(prev.confidence || 0, story.confidence || 0);
         continue;
       }
 
@@ -560,10 +674,128 @@ class GroqStoryAnalyzer {
 
     return merged.map((story, index) => ({
       index: index + 1,
+      ...story,
       title: story.title,
       start: Math.max(0, story.start),
       end: Math.max(story.start + 1, story.end)
     }));
+  }
+
+  _buildRefinementContext(story) {
+    const startIndex = Math.max(0, Number(story.startBlockId) - 1);
+    const endIndex = Math.max(startIndex, Number(story.endBlockId) - 1);
+    const windowStart = Math.max(0, startIndex - GroqStoryAnalyzer.REFINEMENT_CONTEXT_BLOCKS);
+    const windowEnd = Math.min(
+      this._allBlocks.length - 1,
+      endIndex + GroqStoryAnalyzer.REFINEMENT_LOOKAHEAD_BLOCKS
+    );
+    const full = this._allBlocks.slice(windowStart, windowEnd + 1);
+    const maxBlocks = GroqStoryAnalyzer.MAX_REFINEMENT_BLOCKS;
+
+    if (full.length <= maxBlocks) {
+      return {
+        blocks: full,
+        transcriptText: full.map((block) => this._formatBlockLine(block)).join('')
+      };
+    }
+
+    const headCount = Math.floor(maxBlocks / 2);
+    const tailCount = maxBlocks - headCount;
+    const head = full.slice(0, headCount);
+    const tail = full.slice(-tailCount);
+    return {
+      blocks: [...head, ...tail],
+      transcriptText: [
+        ...head.map((block) => this._formatBlockLine(block).trimEnd()),
+        '... middle blocks omitted; do not choose an omitted block as a boundary ...',
+        ...tail.map((block) => this._formatBlockLine(block).trimEnd())
+      ].join('\n') + '\n'
+    };
+  }
+
+  _buildRefinementPrompt(story, context) {
+    const visibleIds = context.blocks.map((block) => block.id);
+    const firstId = Math.min(...visibleIds);
+    const lastId = Math.max(...visibleIds);
+    return [
+      'Refine the boundaries of one proposed spoken story.',
+      `Candidate title: ${story.title}`,
+      `First-pass boundary: blocks ${story.startBlockId}..${story.endBlockId}`,
+      'Move the boundaries when necessary. Do not merely judge the first-pass result.',
+      'The corrected start must include the minimum setup needed to understand the people, subject, premise, and why the story is being told.',
+      'The corrected end must include the answer, outcome, punchline, conclusion, or last relevant consequence.',
+      'Exclude the tail of the previous topic and the beginning of the next unrelated topic.',
+      'Never start on a continuation, unexplained pronoun, answer, or consequence. Never end mid-sentence, on an unanswered setup, or before the payoff.',
+      'Short complete stories are valid. Do not pad for duration.',
+      `Choose only block ids visibly printed below (visible range ${firstId}..${lastId}).`,
+      'If no complete self-contained version of this candidate exists in the visible context, set complete=false.',
+      'Return JSON only:',
+      '{"story":{"title":"Короткий заголовок","start_block_id":1,"end_block_id":4,"has_setup":true,"has_resolution":true,"starts_mid_thought":false,"ends_mid_thought":false,"complete":true,"confidence":0.9}}',
+      'Transcript:',
+      context.transcriptText
+    ].join('\n');
+  }
+
+  _sanitizeRefinedStory(rawStory, originalStory, context, totalDuration) {
+    const visibleIds = new Set(context.blocks.map((block) => block.id));
+    const startBlockId = Number(rawStory?.start_block_id);
+    const endBlockId = Number(rawStory?.end_block_id);
+    if (!Number.isInteger(startBlockId) || !Number.isInteger(endBlockId)) return null;
+    if (!visibleIds.has(startBlockId) || !visibleIds.has(endBlockId) || endBlockId < startBlockId) return null;
+
+    const startBlock = this._allBlocks[startBlockId - 1];
+    const endBlock = this._allBlocks[endBlockId - 1];
+    if (!startBlock || !endBlock) return null;
+
+    const title = normalizeText(rawStory?.title || originalStory.title).slice(0, 80) || originalStory.title;
+    const hasSetup = asBoolean(rawStory?.has_setup, true);
+    const hasResolution = asBoolean(rawStory?.has_resolution, true);
+    const startsMidThought = asBoolean(rawStory?.starts_mid_thought, false);
+    const endsMidThought = asBoolean(rawStory?.ends_mid_thought, false);
+    const complete = asBoolean(
+      rawStory?.complete,
+      hasSetup && hasResolution && !startsMidThought && !endsMidThought
+    );
+
+    return {
+      ...originalStory,
+      title,
+      startBlockId,
+      endBlockId,
+      start: Math.max(0, startBlock.start),
+      end: Math.min(totalDuration, endBlock.end),
+      hasSetup,
+      hasResolution,
+      startsMidThought,
+      endsMidThought,
+      complete,
+      endMayContinue: !complete || !hasResolution || endsMidThought,
+      confidence: clampConfidence(rawStory?.confidence, originalStory.confidence)
+    };
+  }
+
+  async _refineStory(story, position, totalStories, totalDuration, onProgress, signal) {
+    const context = this._buildRefinementContext(story);
+    const label = `Qwen boundary check ${position}/${totalStories}`;
+    onProgress?.(`${label}: checking setup and resolution…`);
+    const parsed = await this._requestWindowWithRetry(
+      this._buildRefinementPrompt(story, context),
+      onProgress,
+      label,
+      signal
+    );
+    const rawStory = parsed?.story || parsed;
+    return this._sanitizeRefinedStory(rawStory, story, context, totalDuration);
+  }
+
+  _isCompleteStory(story) {
+    return !!story &&
+      story.hasSetup !== false &&
+      story.hasResolution !== false &&
+      !story.startsMidThought &&
+      !story.endsMidThought &&
+      !story.endMayContinue &&
+      story.complete !== false;
   }
 
   async analyzeTranscript(transcriptSegments, totalDuration, onProgress, options = {}) {
@@ -599,10 +831,52 @@ class GroqStoryAnalyzer {
       throw new Error('Qwen returned no usable stories from the transcript.');
     }
 
+    const refined = [];
+    for (let i = 0; i < merged.length; i++) {
+      throwIfAborted(signal);
+      const candidate = merged[i];
+      try {
+        const checked = await this._refineStory(
+          candidate,
+          i + 1,
+          merged.length,
+          totalDuration,
+          onProgress,
+          signal
+        );
+        if (!checked) {
+          if (this._isCompleteStory(candidate)) {
+            onProgress?.(`Boundary check ${i + 1}/${merged.length}: invalid block ids, keeping the complete first-pass boundary.`);
+            refined.push({ ...candidate, complete: true });
+          } else {
+            onProgress?.(`Boundary check ${i + 1}/${merged.length}: invalid correction for an incomplete candidate; skipping it.`);
+          }
+          continue;
+        }
+        if (!this._isCompleteStory(checked)) {
+          onProgress?.(`Boundary check ${i + 1}/${merged.length}: skipped an incomplete story candidate.`);
+          continue;
+        }
+        refined.push(checked);
+      } catch (err) {
+        if (isAbortError(err)) throw err;
+        if (this._isCompleteStory(candidate)) {
+          onProgress?.(`Boundary check ${i + 1}/${merged.length} failed (${err.message}); using the complete first-pass boundary.`);
+          refined.push({ ...candidate, complete: true });
+        } else {
+          onProgress?.(`Boundary check ${i + 1}/${merged.length} failed for an incomplete candidate; skipping it.`);
+        }
+      }
+    }
+
+    if (!refined.length) {
+      throw new Error('Qwen found candidates, but none had both a complete setup and resolution.');
+    }
+
     return {
       blocks,
       windows: windows.length,
-      stories: merged
+      stories: refined.map((story, index) => ({ ...story, index: index + 1 }))
     };
   }
 }

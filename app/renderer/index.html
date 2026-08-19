@@ -4,17 +4,17 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com" />
-  <title>program</title>
+  <title>ShotShorts</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&family=JetBrains+Mono:wght@400;700&family=Montserrat:wght@500;700&family=Oswald:wght@500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Inter:wght@400;700&family=JetBrains+Mono:wght@400;700&family=Montserrat:wght@500;700&family=Oswald:wght@500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css?v=20260715g" />
 </head>
 <body>
 
   <!-- TITLE BAR -->
   <div class="titlebar">
-    <div class="titlebar-label" id="glitch-title"><span class="dot"></span> ПРОГРАММА</div>
+    <div class="titlebar-label"><img class="titlebar-logo" src="../icon.svg?v=20260715g" alt="" />ShotShorts</div>
     <div class="titlebar-controls">
       <button class="titlebar-btn" id="btn-minimize" title="Minimize">─</button>
       <button class="titlebar-btn" id="btn-maximize" title="Maximize">□</button>
@@ -25,8 +25,8 @@
   <!-- APP LAYOUT -->
   <div class="app-layout">
     <div class="nav-tabs">
-      <button class="nav-tab active" data-tab="generator"><span class="theme-bolt">ϟ</span> Generator</button>
-      <button class="nav-tab" data-tab="settings">⚙ Settings</button>
+      <button class="nav-tab active" data-tab="generator">Generator</button>
+      <button class="nav-tab" data-tab="settings">Settings</button>
     </div>
 
     <!-- GENERATOR TAB -->
@@ -72,7 +72,7 @@
           <div class="progress-eta" id="progress-eta">--:--</div>
         </div>
 
-        <button class="btn btn-primary generate-btn" id="btn-generate" disabled><span class="theme-bolt">ϟ</span> Generate Videos <span class="theme-bolt">ϟ</span></button>
+        <button class="btn btn-primary generate-btn" id="btn-generate" disabled>Generate Videos</button>
         <button class="btn btn-danger generate-btn" id="btn-cancel" style="display:none">Cancel</button>
       </div>
     </div>
@@ -83,22 +83,37 @@
       <div class="settings-section">
         <div class="section-title" id="txt-app-lang-title">App Language</div>
         <div class="field-group">
-          <label class="field-label" id="txt-interface-lang-label">Interface Language</label>
+          <label class="field-label" id="txt-interface-lang-label" for="app-language">Interface Language</label>
           <select id="app-language">
             <option value="en" selected>English</option>
             <option value="ru">Русский</option>
           </select>
         </div>
         <div class="field-group">
-          <label class="field-label" id="txt-theme-label">Color Theme</label>
+          <label class="field-label" id="txt-theme-label" for="app-theme">Color Theme</label>
           <select id="app-theme" class="strict-select">
-            <option value="dark" selected>Graphite</option>
-            <option value="light">Paper</option>
-            <option value="milk">Vanilla</option>
-            <option value="electric">Electric Lime</option>
-            <option value="sunset">Sunset Pop</option>
-            <option value="lagoon">Lagoon</option>
-            <option value="berry">Berry Punch</option>
+            <optgroup id="app-theme-current-group" label="Current palettes">
+              <option value="dark" selected>Graphite</option>
+              <option value="light">Paper</option>
+              <option value="copper">Copper Night</option>
+              <option value="clay">Terracotta</option>
+              <option value="forest">Forest Linen</option>
+              <option value="wine">Wine Blush</option>
+              <option value="violet">Violet Ink</option>
+              <option value="coral">Coral Reef</option>
+              <option value="midnight">Night Slate</option>
+              <option value="rose">Raspberry Silk</option>
+              <option value="lime">Carbon Lime</option>
+              <option value="signal">Signal Steel</option>
+              <option value="apricot">Peach Amethyst</option>
+            </optgroup>
+            <optgroup id="app-theme-classic-group" label="Classic palettes">
+              <option value="milk">Vanilla</option>
+              <option value="electric">Electric Lime</option>
+              <option value="sunset">Sunset Pop</option>
+              <option value="lagoon">Lagoon</option>
+              <option value="berry">Berry Punch</option>
+            </optgroup>
           </select>
         </div>
       </div>
@@ -109,7 +124,7 @@
         <div class="section-title" id="txt-presets-title">Presets</div>
         <div class="preset-grid">
           <div class="field-group">
-            <label class="field-label" id="txt-preset-select-label">Active Preset</label>
+            <label class="field-label" id="txt-preset-select-label" for="preset-select">Active Preset</label>
             <select id="preset-select">
               <option value="">No preset selected</option>
             </select>
@@ -150,7 +165,7 @@
         </div>
         <div class="proxy-grid" id="proxy-fields" style="opacity:0.4;pointer-events:none">
           <div class="field-group">
-            <label class="field-label" id="txt-proxy-type">Type</label>
+            <label class="field-label" id="txt-proxy-type" for="proxy-type">Type</label>
             <select id="proxy-type">
               <option value="http">HTTP</option>
               <option value="https">HTTPS</option>
@@ -184,17 +199,17 @@
           <label class="toggle-label"><input type="checkbox" id="subtitles-toggle" /> <span id="txt-enable-subtitles">Enable</span></label>
         </div>
         <div id="subtitle-fields" style="opacity:0.4;pointer-events:none">
-          <p class="hint" style="margin-top:0;margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">1. Распознавание</p>
+          <p class="subsection-title">1. Распознавание</p>
           <div class="proxy-grid">
             <div class="field-group">
-              <label class="field-label" id="txt-sub-model">Model Quality</label>
+              <label class="field-label" id="txt-sub-model" for="subtitle-model">Model Quality</label>
               <select id="subtitle-model" class="strict-select">
                 <option value="whisper-large-v3" selected>Whisper Large v3</option>
                 <option value="whisper-large-v3-turbo">Whisper Large v3 Turbo</option>
               </select>
             </div>
             <div class="field-group">
-              <label class="field-label" id="txt-sub-language">Language</label>
+              <label class="field-label" id="txt-sub-language" for="subtitle-language">Language</label>
               <select id="subtitle-language" class="strict-select">
                 <option value="ru" selected>Русский</option>
                 <option value="en">English</option>
@@ -206,10 +221,10 @@
             </div>
           </div>
 
-          <p class="hint" style="margin-top:16px;margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">2. Внешний вид</p>
+          <p class="subsection-title">2. Внешний вид</p>
           <div class="proxy-grid">
             <div class="field-group">
-              <label class="field-label" id="txt-sub-style">Style Preset</label>
+              <label class="field-label" id="txt-sub-style" for="subtitle-style">Style Preset</label>
               <select id="subtitle-style" class="strict-select">
                 <option value="Classic">Classic (white + shadow)</option>
                 <option value="Minimal">Minimal (clean)</option>
@@ -220,7 +235,7 @@
               </select>
             </div>
             <div class="field-group">
-              <label class="field-label" id="txt-sub-case">Case</label>
+              <label class="field-label" id="txt-sub-case" for="subtitle-case">Case</label>
               <select id="subtitle-case" class="strict-select">
                 <option value="sentence" selected>Sentence Case</option>
                 <option value="uppercase">UPPERCASE</option>
@@ -228,7 +243,7 @@
               </select>
             </div>
             <div class="field-group">
-              <label class="field-label" id="txt-sub-font-family">Font Family</label>
+              <label class="field-label" id="txt-sub-font-family" for="subtitle-font-family">Font Family</label>
               <select id="subtitle-font-family">
                 <option value="Inter" selected>Inter</option>
                 <option value="JetBrains Mono">JetBrains Mono</option>
@@ -246,10 +261,10 @@
             </div>
           </div>
 
-          <p class="hint" style="margin-top:16px;margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">3. Макет</p>
+          <p class="subsection-title">3. Макет</p>
           <div class="proxy-grid">
             <div class="field-group">
-              <label class="field-label" id="txt-sub-position">Position</label>
+              <label class="field-label" id="txt-sub-position" for="subtitle-position">Position</label>
               <select id="subtitle-position" class="strict-select">
                 <option value="bottom" selected>Bottom</option>
                 <option value="middle">Middle</option>
@@ -274,7 +289,7 @@
              </div>
           </div>
 
-          <p class="hint" style="margin-top:16px;margin-bottom:12px;font-weight:700;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">4. Караоке</p>
+          <p class="subsection-title">4. Караоке</p>
           <div class="proxy-grid">
             <div class="field-group karaoke-row">
               <div class="karaoke-right" style="display:flex; align-items:center;">
@@ -337,6 +352,7 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <script src="sharp-select.js?v=20260715g"></script>
+  <script src="app.js?v=20260715g"></script>
 </body>
 </html>

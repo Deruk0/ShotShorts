@@ -7,6 +7,7 @@
     "app:start": "npm --workspace app start",
     "app:check-resources": "npm --workspace app run check:resources",
     "app:build": "npm --workspace app run build",
+    "app:build:dir": "npm --workspace app run build:dir",
     "app:build:fast": "npm --workspace app run build:fast",
     "app:build:portable": "npm --workspace app run build:portable",
     "web:dev": "npm --workspace web run dev",

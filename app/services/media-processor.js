@@ -147,9 +147,29 @@ class MediaProcessor {
 
 
   getBackgroundVideos(folder) {
-    return fs.readdirSync(folder)
-      .filter(f => VIDEO_EXTS.has(path.extname(f).toLowerCase()))
-      .map(f => path.join(folder, f));
+    const videos = [];
+    const visit = (directory) => {
+      let entries;
+      try {
+        entries = fs.readdirSync(directory, { withFileTypes: true });
+      } catch (err) {
+        console.warn(`[ShotShorts] Cannot read background directory "${directory}": ${err.message}`);
+        return;
+      }
+
+      for (const entry of entries) {
+        const filePath = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          visit(filePath);
+        } else if (entry.isFile() && VIDEO_EXTS.has(path.extname(entry.name).toLowerCase())) {
+          videos.push(filePath);
+        }
+      }
+    };
+
+    visit(folder);
+    console.log(`[ShotShorts] Found ${videos.length} background video(s) in "${folder}" (including subfolders).`);
+    return videos;
   }
 
   getVideoDuration(file) {
@@ -191,11 +211,13 @@ class MediaProcessor {
     let totalDur = 0;
     const selected = [];
     const maxSafetyDur = duration + 5;
+    const unusableBackgrounds = new Set();
 
     while (totalDur < maxSafetyDur) {
       if (bgContext.unused.length === 0) {
-        if (bgContext.all.length === 0) break;
-        let nextBatch = [...bgContext.all].sort(() => Math.random() - 0.5);
+        const usableBackgrounds = bgContext.all.filter(bg => !unusableBackgrounds.has(bg));
+        if (usableBackgrounds.length === 0) break;
+        let nextBatch = [...usableBackgrounds].sort(() => Math.random() - 0.5);
         if (selected.length > 0 && nextBatch[0] === selected[selected.length - 1] && nextBatch.length > 1) {
           const temp = nextBatch[0];
           nextBatch[0] = nextBatch[1];
@@ -213,9 +235,13 @@ class MediaProcessor {
         if (d > 0) {
           selected.push(bg);
           totalDur += d;
+        } else {
+          unusableBackgrounds.add(bg);
+          console.warn(`[ShotShorts] Skipping background with invalid duration: ${bg}`);
         }
       } catch (err) {
-        // Skip inaccessible videos
+        unusableBackgrounds.add(bg);
+        console.warn(`[ShotShorts] Skipping unreadable background "${bg}": ${err.message}`);
       }
     }
 

@@ -11,11 +11,6 @@ const required = [
   path.join(resourcesDir, 'ffprobe.exe')
 ];
 
-const chromiumCandidates = [
-  path.join(resourcesDir, 'chromium', 'chrome-win64', 'chrome.exe'),
-  path.join(resourcesDir, 'chromium', 'chrome.exe')
-];
-
 function findOnPath(fileName) {
   try {
     const output = execFileSync('where.exe', [fileName], {
@@ -48,7 +43,6 @@ for (const targetPath of required) {
 }
 
 const missingRequired = required.filter((filePath) => !fs.existsSync(filePath));
-const hasChromium = chromiumCandidates.some((filePath) => fs.existsSync(filePath));
 
 if (missingRequired.length > 0) {
   const lines = [
@@ -70,13 +64,6 @@ if (missingRequired.length > 0) {
     console.error(message);
     process.exit(1);
   }
-}
-
-if (!hasChromium) {
-  console.warn([
-    '[ShotShorts] Chromium was not found in app/resources/chromium/.',
-    'Pixel-matched subtitle overlay will depend on Playwright/system Chrome and may fall back to ASS in the packaged app.'
-  ].join('\n'));
 }
 
 if (missingRequired.length === 0) {
