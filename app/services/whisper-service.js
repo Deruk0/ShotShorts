@@ -227,9 +227,11 @@ function buildProxyAgent(proxy) {
 // ---------------------------------------------------------------------------
 // Groq API request helper
 // ---------------------------------------------------------------------------
-async function groqRequest(apiKey, audioPath, model, language, proxy, signal) {
+async function groqRequest(apiKey, audioPath, model, language, proxy, signal, baseUrl = '') {
   throwIfAborted(signal);
   const FormData = require('form-data');
+  const { normalizeBaseUrl, GROQ_TRANSCRIPTION_BASE } = require('./model-registry');
+  const endpoint = `${normalizeBaseUrl(baseUrl) || GROQ_TRANSCRIPTION_BASE}/audio/transcriptions`;
   const form = new FormData();
   const ext = path.extname(audioPath).toLowerCase();
   const contentType = ext === '.mp3' ? 'audio/mpeg' : 'audio/wav';
@@ -280,7 +282,7 @@ async function groqRequest(apiKey, audioPath, model, language, proxy, signal) {
   let response;
   try {
     response = await axios.post(
-      'https://api.groq.com/openai/v1/audio/transcriptions',
+      endpoint,
       form,
       config
     );
@@ -324,6 +326,10 @@ function isPayloadTooLargeError(err) {
 
 function isRateLimitError(err) {
   return err?.response?.status === 429;
+}
+
+function isModelUnavailableError(err) {
+  return [401, 403, 404].includes(err?.response?.status);
 }
 
 function parseDurationMs(value) {
@@ -406,7 +412,10 @@ async function waitForGroqTranscriptionKey(apiKeys, onProgress, signal) {
 
 // Wraps groqRequest with retry + exponential backoff for transient failures.
 // Each retry re-creates the request (and its file read stream) from scratch.
-async function groqRequestWithRetry(apiKeys, audioPath, model, language, proxy, onProgress, signal, maxRetries = 3) {
+// opts.chainHasNext: another model follows in the fallback chain — rate-limit
+// failures then throw immediately so the caller can switch models instead of
+// waiting out the cooldown.
+async function groqRequestWithRetry(apiKeys, audioPath, model, language, proxy, onProgress, signal, maxRetries = 3, baseUrl = '', opts = {}) {
   let lastErr = null;
   let rateLimitRetries = 0;
   let transientRetries = 0;
@@ -416,12 +425,15 @@ async function groqRequestWithRetry(apiKeys, audioPath, model, language, proxy, 
     const selectedKey = await waitForGroqTranscriptionKey(apiKeys, onProgress, signal);
 
     try {
-      return await groqRequest(selectedKey.apiKey, audioPath, model, language, proxy, signal);
+      return await groqRequest(selectedKey.apiKey, audioPath, model, language, proxy, signal, baseUrl);
     } catch (err) {
       lastErr = err;
       if (isAbortError(err)) throw err;
 
       if (isRateLimitError(err)) {
+        if (opts.chainHasNext) {
+          throw err;
+        }
         if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
           throw err;
         }
@@ -655,7 +667,7 @@ class WhisperService {
     }));
   }
 
-  async _transcribeChunked(audioPath, model, language, apiKeys, proxy, onProgress, signal) {
+  async _transcribeChunked(audioPath, language, proxy, onProgress, signal, modelChain) {
     throwIfAborted(signal);
     const fileSize = fs.statSync(audioPath).size;
     const totalDuration = await this._getAudioDuration(audioPath, signal);
@@ -664,24 +676,28 @@ class WhisperService {
       : MAX_CHUNK_DURATION_SEC;
     const chunkDurationSec = Math.max(MIN_CHUNK_DURATION_SEC, Math.min(MAX_CHUNK_DURATION_SEC, estimatedChunkDuration || MAX_CHUNK_DURATION_SEC));
 
-    onProgress?.(`Audio is too large for a single Groq upload. Splitting into ~${Math.round(chunkDurationSec / 60)} min Whisper chunks…`);
+    onProgress?.(`Audio is too large for a single upload. Splitting into ~${Math.round(chunkDurationSec / 60)} min chunks…`);
     const chunks = await this._splitAudioIntoChunks(audioPath, chunkDurationSec, onProgress, signal);
     const fullSegments = [];
+    // Sticky chain cursor: once a model is skipped, later chunks keep using
+    // the model that last worked.
+    const chainCursor = { index: 0 };
 
     try {
       for (let i = 0; i < chunks.length; i++) {
         throwIfAborted(signal);
         const chunk = chunks[i];
-        onProgress?.(`Transcribing Whisper chunk ${i + 1}/${chunks.length}…`);
+        onProgress?.(`Transcribing chunk ${i + 1}/${chunks.length}…`);
         try {
-          const result = await groqRequestWithRetry(
-            apiKeys,
+          const result = await this._requestWithChain(
             chunk.path,
-            model,
             language,
             proxy,
             (msg) => onProgress?.(`Chunk ${i + 1}/${chunks.length}: ${msg}`),
-            signal
+            signal,
+            3,
+            modelChain,
+            chainCursor
           );
           const parsed = this._parseVerboseResult(result);
           fullSegments.push(...this._shiftSegments(parsed, chunk.offsetSec));
@@ -708,48 +724,81 @@ class WhisperService {
   }
 
   /**
-   * Transcribe an audio file via Groq API.
+   * Transcribe an audio file through an ordered fallback chain of models.
+   * Each entry: { name, baseUrl, apiKey, modelId }. When a model hits rate
+   * limits (or its key/model is rejected) the next entry takes over —
+   * the switch is sticky for the rest of the run.
    * @param {string}   audioPath   Path to WAV / MP3
-   * @param {object}   opts        { model, language, apiKey, proxy }
+   * @param {object}   opts        { language, proxy, signal, models: [...] }
    * @param {function} onProgress
    * @returns {Promise<Array>}     Array of { start, end, text, words[] }
    */
   async transcribe(audioPath, opts = {}, onProgress) {
-    const model    = opts.model || 'whisper-large-v3';
     const language = opts.language || 'ru';
-    const apiKeys  = normalizeGroqApiKeys(
-      opts.apiKeys !== undefined ? opts.apiKeys : this.apiKeys,
-      opts.apiKey || ''
-    );
-    const proxy    = opts.proxy || this.proxy;
-    const signal   = opts.signal;
+    const proxy = opts.proxy || this.proxy;
+    const signal = opts.signal;
     throwIfAborted(signal);
 
-    if (!apiKeys.length) {
-      throw new Error('Groq API keys not set. Add at least one in Settings.');
+    const modelChain = (Array.isArray(opts.models) ? opts.models : [])
+      .filter((entry) => entry && entry.baseUrl && entry.apiKey && entry.modelId);
+    if (!modelChain.length) {
+      throw new Error('No transcription models configured. Build the transcription chain in Settings.');
     }
-
-    onProgress?.(`Transcribing audio [${model}] via Groq…`);
 
     const fileSize = fs.statSync(audioPath).size;
     let segments;
 
     if (fileSize > MAX_DIRECT_UPLOAD_BYTES) {
-      segments = await this._transcribeChunked(audioPath, model, language, apiKeys, proxy, onProgress, signal);
+      segments = await this._transcribeChunked(audioPath, language, proxy, onProgress, signal, modelChain);
     } else {
       try {
-        const result = await groqRequestWithRetry(apiKeys, audioPath, model, language, proxy, onProgress, signal);
+        const result = await this._requestWithChain(audioPath, language, proxy, onProgress, signal, 3, modelChain);
         segments = this._parseVerboseResult(result);
       } catch (err) {
         if (isAbortError(err)) throw err;
         if (!isPayloadTooLargeError(err)) throw err;
-        onProgress?.('Groq rejected the full upload with 413. Retrying with Whisper chunking…');
-        segments = await this._transcribeChunked(audioPath, model, language, apiKeys, proxy, onProgress, signal);
+        onProgress?.('The provider rejected the full upload with 413. Retrying with chunking…');
+        segments = await this._transcribeChunked(audioPath, language, proxy, onProgress, signal, modelChain);
       }
     }
 
     onProgress?.(`Transcription complete: ${segments.length} segments`);
     return segments;
+  }
+
+  /**
+   * Run one request against the model chain. Advances the sticky chain
+   * cursor on rate limits and unavailable models/keys (401/403/404).
+   */
+  async _requestWithChain(audioPath, language, proxy, onProgress, signal, maxRetries, modelChain, cursor = { index: 0 }) {
+    for (; cursor.index < modelChain.length; cursor.index++) {
+      const entry = modelChain[cursor.index];
+      const hasNext = cursor.index < modelChain.length - 1;
+      onProgress?.(`Transcribing audio [${entry.modelId}] via ${entry.name || 'custom provider'}…`);
+      try {
+        return await groqRequestWithRetry(
+          [entry.apiKey],
+          audioPath,
+          entry.modelId,
+          language,
+          proxy,
+          onProgress,
+          signal,
+          maxRetries,
+          entry.baseUrl,
+          { chainHasNext: hasNext }
+        );
+      } catch (err) {
+        if (isAbortError(err) || isPayloadTooLargeError(err)) throw err;
+        const switchable = isRateLimitError(err) || isModelUnavailableError(err);
+        if (switchable && hasNext) {
+          onProgress?.(`Model ${entry.name} is unavailable — switching to ${modelChain[cursor.index + 1].name}…`);
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error('All models in the transcription chain failed.');
   }
 
   /**
@@ -815,7 +864,13 @@ class WhisperService {
     const wordsPerLine = Math.max(1, Number(subtitleOptions.wordsPerLine || 3));
     const maxLineMs = Math.max(300, Number(subtitleOptions.maxLineMs || 1200));
     const position = subtitleOptions.position || 'bottom';
-    const alignment = position === 'top' ? 8 : (position === 'middle' ? 5 : 2);
+    const useCustomPos = !!subtitleOptions.customPos;
+    const alignment = useCustomPos ? 5 : (position === 'top' ? 8 : (position === 'middle' ? 5 : 2));
+    // \pos() overrides margins entirely; anchor is the line's center point
+    // (Alignment 5), so the same X/Y works for one-word and multi-line text.
+    const customPosTag = useCustomPos
+      ? `{\\pos(${Math.max(0, Math.min(1080, Math.round(Number(subtitleOptions.customX) || 540)))},${Math.max(0, Math.min(1920, Math.round(Number(subtitleOptions.customY) || 1850)))})}`
+      : '';
     const fontSize = Math.max(12, Number(subtitleOptions.fontSize || style.fontSize || 20));
     const marginV = Math.max(10, Number(subtitleOptions.marginV || style.marginV || 40));
     const karaoke = !!subtitleOptions.karaoke;
@@ -843,6 +898,19 @@ class WhisperService {
     const basePrimaryColourAss = basePrimaryColour.endsWith('&') ? basePrimaryColour : `${basePrimaryColour}&`;
     const borderStyle = style.BorderStyle || 1;
     const marginH = Math.max(20, Number(style.marginH || 40));
+
+    // Interstitial banners extend the output timeline: the main content
+    // pauses for `durationSec` after every full `intervalSec` of playback.
+    // Each subtitle event shifts forward by the total pause time that starts
+    // before it, so text never renders on top of the banner window.
+    const inter = subtitleOptions.interstitial;
+    const interInterval = inter ? Math.max(1, Number(inter.intervalSec) || 0) : 0;
+    const interDuration = inter ? Math.max(0, Number(inter.durationSec) || 0) : 0;
+    const shiftForInterstitial = (t) => {
+      const tt = Math.max(0, Number(t) || 0);
+      if (!(interInterval > 0) || !(interDuration > 0)) return tt;
+      return tt + interDuration * Math.floor(tt / interInterval);
+    };
 
     const header = [
       '[Script Info]',
@@ -881,17 +949,19 @@ class WhisperService {
           const cEndAbsRaw = Number(chunk[chunk.length - 1].end || seg.end);
           const cEndAbsCapped = Math.min(cEndAbsRaw, cStartAbs + maxLineMs / 1000);
 
-          const cStart = Math.max(0, cStartAbs - offsetSec);
-          const cEnd = Math.max(cStart + 0.12, cEndAbsCapped - offsetSec);
+          const cStartRaw = Math.max(0, cStartAbs - offsetSec);
+          const cEndRaw = Math.max(cStartRaw + 0.12, cEndAbsCapped - offsetSec);
+          const cStart = shiftForInterstitial(cStartRaw);
+          const cEnd = shiftForInterstitial(cEndRaw);
           const chunkWords = chunk.map(w => String(w.word || '').trim()).filter(Boolean);
           let text = chunkWords.join(' ').trim();
           if (karaoke) {
             for (let wi = 0; wi < chunk.length; wi++) {
               const w = chunk[wi];
-              const wStart = Number(w.start || cStart);
-              const nextStart = wi < chunk.length - 1 ? Number(chunk[wi + 1].start || w.end || wStart) : Number(w.end || cEnd);
-              const ws = Math.max(0, wStart - offsetSec);
-              const we = Math.max(ws + 0.06, Math.min(cEnd, nextStart - offsetSec));
+              const wStart = Number(w.start || cStartRaw);
+              const nextStart = wi < chunk.length - 1 ? Number(chunk[wi + 1].start || w.end || wStart) : Number(w.end || cEndRaw);
+              const ws = shiftForInterstitial(Math.max(0, wStart - offsetSec));
+              const we = Math.max(ws + 0.06, shiftForInterstitial(Math.min(cEndRaw, nextStart - offsetSec)));
               const line = buildAssKaraokeLine(
                 chunkWords,
                 wi,
@@ -901,7 +971,7 @@ class WhisperService {
                 basePrimaryColourAss
               );
               if (line) {
-                events.push(`Dialogue: 0,${seconds2ass(ws)},${seconds2ass(we)},Default,,0,0,0,,${line}`);
+                events.push(`Dialogue: 0,${seconds2ass(ws)},${seconds2ass(we)},Default,,0,0,0,,${customPosTag}${line}`);
               }
             }
             idx += wordsPerLine;
@@ -909,7 +979,7 @@ class WhisperService {
           }
           text = escapeAssText(applyCaseToText(text, resolvedCase));
           if (text) {
-            events.push(`Dialogue: 0,${seconds2ass(cStart)},${seconds2ass(cEnd)},Default,,0,0,0,,${text}`);
+            events.push(`Dialogue: 0,${seconds2ass(cStart)},${seconds2ass(cEnd)},Default,,0,0,0,,${customPosTag}${text}`);
           }
           idx += wordsPerLine;
         }
@@ -926,9 +996,9 @@ class WhisperService {
           if (!chunkText) { idx += wordsPerLine; continue; }
           const wordStart = segStart + (idx / totalWords) * segDuration;
           const wordEnd = Math.min(segStart + ((idx + wordsPerLine) / totalWords) * segDuration, segEnd);
-          const cStart = wordStart;
-          const cEnd = Math.min(Math.max(cStart + 0.2, cStart + maxLineMs / 1000), wordEnd);
-          events.push(`Dialogue: 0,${seconds2ass(cStart)},${seconds2ass(cEnd)},Default,,0,0,0,,${chunkText}`);
+          const cStart = shiftForInterstitial(wordStart);
+          const cEnd = shiftForInterstitial(Math.min(Math.max(cStart + 0.2, wordStart + maxLineMs / 1000), wordEnd));
+          events.push(`Dialogue: 0,${seconds2ass(cStart)},${seconds2ass(cEnd)},Default,,0,0,0,,${customPosTag}${chunkText}`);
           idx += wordsPerLine;
         }
       }

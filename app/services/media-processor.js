@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { createAbortError, runFfmpegCommand } = require('./cancellation');
+const { buildBannerFilterStrings, buildInterstitialFilterGraph, planInterstitialSegments, resolveDisplayDimensions, hasAlphaPixFmt } = require('./banner-utils');
 
 const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.avi', '.mov', '.webm', '.m4v']);
 const SRT_STYLE_PRESETS = {
@@ -181,13 +182,74 @@ class MediaProcessor {
     });
   }
 
+  getMediaDimensions(file) {
+    return new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(file, (err, data) => {
+        if (err) return reject(err);
+        const stream = (data.streams || []).find((s) => s.width && s.height);
+        if (!stream) return reject(new Error('No readable video stream'));
+        const dims = resolveDisplayDimensions(stream);
+        if (!dims.width || !dims.height) return reject(new Error('No readable video stream'));
+        const hasAudio = (data.streams || []).some((s) => s.codec_type === 'audio');
+        const durationRaw = Number(data.format && data.format.duration);
+        const durationSec = Number.isFinite(durationRaw) && durationRaw > 0 ? durationRaw : null;
+        resolve({ ...dims, pixFmt: stream.pix_fmt || '', codecName: stream.codec_name || '', hasAudio, durationSec });
+      });
+    });
+  }
+
+  /**
+   * Re-encode a banner video once into a clean, loop-friendly temp file:
+   * rotation baked in, constant 30fps, even dimensions, audio stripped.
+   * This makes every decodable container/codec play reliably as a looping
+   * banner (edit lists, VFR, HDR, odd sizes, exotic timebases). GIFs are
+   * skipped (they loop fine as-is) and failures fall back to the original.
+   */
+  async normalizeBannerVideo(srcPath, mediaInfo, onProgress) {
+    const pixFmt = String((mediaInfo && mediaInfo.pixFmt) || '').toLowerCase();
+    const width = Math.max(2, Number(mediaInfo && mediaInfo.width) || 0);
+
+    // Cap huge sources at 1080px wide and force even dimensions (required
+    // by yuv420p / vp9 encoders). Height keeps the aspect via -2.
+    let evenW = Math.min(width, 1080);
+    if (evenW % 2 !== 0) evenW -= 1;
+    if (evenW < 2) evenW = 2;
+
+    const hasAlpha = hasAlphaPixFmt(pixFmt);
+    const out = path.join(os.tmpdir(), `ss_banner_norm_${Date.now()}.${hasAlpha ? 'webm' : 'mp4'}`);
+    onProgress?.('Normalizing banner video for reliable playback…');
+
+    const codecOptions = hasAlpha
+      ? ['-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-deadline', 'realtime', '-cpu-used', '8', '-crf', '30', '-b:v', '0', '-auto-alt-ref', '0']
+      : ['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-crf', '20'];
+
+    const cmd = ffmpeg(srcPath)
+      .outputOptions([
+        '-vf', `scale=${evenW}:-2:flags=lanczos,fps=30,setsar=1,format=${hasAlpha ? 'yuva420p' : 'yuv420p'}`,
+        ...codecOptions,
+        '-an',
+        '-t', '60'
+      ])
+      .output(out);
+
+    await this._runCommand(cmd);
+
+    const stats = fs.existsSync(out) ? fs.statSync(out) : null;
+    if (!stats || stats.size < 1000) {
+      try { if (stats) fs.unlinkSync(out); } catch {}
+      throw new Error('normalized banner is empty');
+    }
+    return out;
+  }
+
   /**
    * @param {string|null} subtitlePath  Optional path to subtitle file (.ass/.srt) to burn in.
+   * @param {object|null} bannerOptions  Optional banner overlay: { path, isImage, layout: {x,y,width,height} }.
    */
-  async assembleVideo(segment, audioPath, bgContext, outputDir, onProgress, subtitlePath = null, subtitleOptions = {}) {
+  async assembleVideo(segment, audioPath, bgContext, outputDir, onProgress, subtitlePath = null, subtitleOptions = {}, bannerOptions = null) {
     this._throwIfCancelled();
 
-    console.log(`[ShotShorts] assembleVideo called, subtitlePath: ${subtitlePath || 'null'}`);
+    console.log(`[ShotShorts] assembleVideo called, subtitlePath: ${subtitlePath || 'null'}, banner: ${bannerOptions?.path || 'null'}`);
 
     const duration = segment.end - segment.start;
     const safeTitle = this._sanitizeFileName(segment.title || `Story ${segment.index}`);
@@ -295,37 +357,94 @@ class MediaProcessor {
         });
         filterStrings.push(`${concatInputs.join('')}concat=n=${selected.length}:v=1:a=0[vconcat]`);
 
+        // Interstitial mode: freeze the main video + silence inside every
+        // scheduled window while the banner video plays with its own audio.
+        // Windows depend on this clip's duration, so the plan is built here.
+        // Each window gets its own banner demuxer (one input per window):
+        // a shared split-branched banner stream loses buffered frames when
+        // the filtergraph reinitializes, leaving later windows empty.
+        const interstitialActive = !!(bannerOptions && bannerOptions.interstitial && !bannerOptions.isImage);
+        const interstitialPlanDef = interstitialActive
+          ? planInterstitialSegments(duration, bannerOptions.interstitial.intervalSec, bannerOptions.interstitial.durationSec)
+          : null;
+        const interstitialWindows = interstitialPlanDef
+          ? interstitialPlanDef.segments.filter((s) => s.type === 'window').length
+          : 0;
+        const interstitialPlan = interstitialPlanDef && interstitialWindows > 0
+          ? buildInterstitialFilterGraph({
+            baseLabel: 'vconcat',
+            bannerIndexBase: selected.length + 1 + (isSubtitleVideo ? 1 : 0),
+            audioInputIndex: selected.length,
+            bannerHasAudio: !!bannerOptions.bannerHasAudio,
+            layout: bannerOptions.layout,
+            opacity: bannerOptions.opacity,
+            segments: interstitialPlanDef.segments
+          })
+          : null;
+        if (interstitialPlan) {
+          // One banner input (video+audio) per interstitial window.
+          for (let w = 0; w < interstitialWindows; w++) {
+            cmd.input(bannerOptions.path);
+          }
+          filterStrings.push(...interstitialPlan.filters);
+          console.log(`[ShotShorts] Interstitial banner: ${interstitialWindows} window(s) of ${bannerOptions.interstitial.durationSec}s every ${bannerOptions.interstitial.intervalSec}s`);
+        } else if (bannerOptions) {
+          cmd.input(bannerOptions.path);
+          if (!bannerOptions.isImage) cmd.inputOptions(['-stream_loop', '-1']);
+        }
+
         // Burn-in subtitles if provided
         if (subtitlePath) {
+          const baseVideoLabel = interstitialPlan ? interstitialPlan.videoLabel : 'vconcat';
           console.log(`[ShotShorts] Applying subtitle: ${subtitlePath}, ext: ${path.extname(subtitlePath).toLowerCase()}`);
           if (isSubtitleVideo) {
             // Overlay pre-rendered subtitle video with alpha
             const subInputIndex = selected.length + 1;
-            filterStrings.push(`[vconcat][${subInputIndex}:v]overlay=0:0:eof_action=pass:format=yuv420[vout]`);
+            filterStrings.push(`[${baseVideoLabel}][${subInputIndex}:v]overlay=0:0:eof_action=pass:format=yuv420[vsub]`);
             console.log(`[ShotShorts] Using video overlay for subtitles`);
           } else {
             const escaped = this._escapeSubtitlePathForFilter(subtitlePath);
             const ext = path.extname(subtitlePath).toLowerCase();
             console.log(`[ShotShorts] Escaped subtitle path: ${escaped}`);
             if (ext === '.ass') {
-              filterStrings.push(`[vconcat]${this._buildAssFilterArgs(subtitlePath, subtitleOptions)}[vout]`);
+              filterStrings.push(`[${baseVideoLabel}]${this._buildAssFilterArgs(subtitlePath, subtitleOptions)}[vsub]`);
             } else {
               const forceStyle = this._buildSrtForceStyle(subtitleOptions);
-              filterStrings.push(`[vconcat]subtitles='${escaped}':charenc=UTF-8:force_style='${forceStyle}'[vout]`);
+              filterStrings.push(`[${baseVideoLabel}]subtitles='${escaped}':charenc=UTF-8:force_style='${forceStyle}'[vsub]`);
             }
           }
         } else {
-          // `copy` is not a valid filter; use no-op pass-through.
-          filterStrings.push(`[vconcat]null[vout]`);
+          // `copy` is not a valid filter; use no-op pass-through. In
+          // interstitial mode the composed video arrives as [ivout].
+          const passThroughBase = interstitialPlan ? interstitialPlan.videoLabel : 'vconcat';
+          filterStrings.push(`[${passThroughBase}]null[vsub]`);
+        }
+
+        // Overlay the ad banner on top of everything (overlay mode only;
+        // interstitial mode already composited its own [ivout] chain).
+        if (bannerOptions && !interstitialPlan) {
+          const bannerInputIndex = selected.length + 1 + (isSubtitleVideo ? 1 : 0);
+          filterStrings.push(...buildBannerFilterStrings(bannerInputIndex, bannerOptions.layout, 'vsub', 'vout', bannerOptions.opacity));
+          console.log(`[ShotShorts] Applying banner: ${bannerOptions.path} at ${bannerOptions.layout.x},${bannerOptions.layout.y} ${bannerOptions.layout.width}x${bannerOptions.layout.height} opacity=${bannerOptions.opacity ?? 1}`);
+        } else {
+          filterStrings.push(`[vsub]null[vout]`);
         }
 
         const audioInputIndex = selected.length;
+        // Interstitial windows extend the clip: the main content pauses while
+        // the banner plays, so the output runs longer than the audio chunk.
+        const interstitialExtra = interstitialPlan
+          ? interstitialPlanDef.segments
+            .filter((s) => s.type === 'window')
+            .reduce((sum, s) => sum + s.duration, 0)
+          : 0;
+        const audioMap = interstitialPlan ? `[iall]` : `${audioInputIndex}:a:0`;
         cmd.complexFilter(filterStrings)
           .outputOptions([
-            '-t', String(duration),
+            '-t', String(duration + interstitialExtra),
             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
             '-c:a', 'aac', '-b:a', '192k',
-            '-map', '[vout]', '-map', `${audioInputIndex}:a:0`,
+            '-map', '[vout]', '-map', audioMap,
             '-shortest',
             '-movflags', '+faststart'
           ])
@@ -371,22 +490,50 @@ class MediaProcessor {
           const fallbackFilters = [
             `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,format=yuv420p[vscaled]`
           ];
+
+          // Interstitial graph works the same way on the fallback path: the
+          // paused frame comes from the scaled single background. One banner
+          // demuxer per window (see the main-path comment).
+          const fallbackInterstitial = bannerOptions && bannerOptions.interstitial && !bannerOptions.isImage
+            ? planInterstitialSegments(duration, bannerOptions.interstitial.intervalSec, bannerOptions.interstitial.durationSec)
+            : null;
+          const fallbackWindows = fallbackInterstitial
+            ? fallbackInterstitial.segments.filter((s) => s.type === 'window').length
+            : 0;
+          const fallbackPlan = fallbackInterstitial && fallbackWindows > 0
+            ? buildInterstitialFilterGraph({
+              baseLabel: 'vscaled',
+              bannerIndexBase: isSubtitleVideo ? 3 : 2,
+              audioInputIndex: isSubtitleVideo ? 2 : 1,
+              bannerHasAudio: !!bannerOptions.bannerHasAudio,
+              layout: bannerOptions.layout,
+              opacity: bannerOptions.opacity,
+              segments: fallbackInterstitial.segments
+            })
+            : null;
+          if (fallbackPlan) {
+            fallbackFilters.push(...fallbackPlan.filters);
+            console.log(`[ShotShorts] Interstitial banner (fallback path): ${fallbackWindows} window(s)`);
+          }
+
           if (subtitlePath) {
+            const fallbackBase = fallbackPlan ? fallbackPlan.videoLabel : 'vscaled';
             if (isSubtitleVideo) {
-              fallbackFilters.push(`[vscaled][1:v]overlay=0:0:eof_action=pass:format=yuv420[vout]`);
+              fallbackFilters.push(`[${fallbackBase}][1:v]overlay=0:0:eof_action=pass:format=yuv420[vsub]`);
             } else {
               const escaped = this._escapeSubtitlePathForFilter(subtitlePath);
               const ext = path.extname(subtitlePath).toLowerCase();
               if (ext === '.ass') {
-                fallbackFilters.push(`[vscaled]${this._buildAssFilterArgs(subtitlePath, subtitleOptions)}[vout]`);
+                fallbackFilters.push(`[${fallbackBase}]${this._buildAssFilterArgs(subtitlePath, subtitleOptions)}[vsub]`);
               } else {
                 const forceStyle = this._buildSrtForceStyle(subtitleOptions);
-                fallbackFilters.push(`[vscaled]subtitles='${escaped}':charenc=UTF-8:force_style='${forceStyle}'[vout]`);
+                fallbackFilters.push(`[${fallbackBase}]subtitles='${escaped}':charenc=UTF-8:force_style='${forceStyle}'[vsub]`);
               }
             }
           } else {
             // `copy` is not a valid filter; use no-op pass-through.
-            fallbackFilters.push(`[vscaled]null[vout]`);
+            const passBase = fallbackPlan ? fallbackPlan.videoLabel : 'vscaled';
+            fallbackFilters.push(`[${passBase}]null[vsub]`);
           }
 
           const cmd = ffmpeg()
@@ -394,15 +541,39 @@ class MediaProcessor {
             .inputOptions(['-stream_loop', '-1']);
           if (isSubtitleVideo) cmd.input(subtitlePath);
           cmd.input(safeSegAudio);
+          if (bannerOptions && fallbackPlan) {
+            // One banner input (video+audio) per interstitial window.
+            for (let w = 0; w < fallbackWindows; w++) {
+              cmd.input(bannerOptions.path);
+            }
+          } else if (bannerOptions) {
+            cmd.input(bannerOptions.path);
+            if (!bannerOptions.isImage) cmd.inputOptions(['-stream_loop', '-1']);
+          }
 
           const audioMapIndex = isSubtitleVideo ? 2 : 1;
+          if (bannerOptions && !fallbackPlan) {
+            fallbackFilters.push(...buildBannerFilterStrings(audioMapIndex + 1, bannerOptions.layout, 'vsub', 'vout', bannerOptions.opacity));
+          } else {
+            // With a fallbackPlan [vsub] already comes from [ivout] (either
+            // via the subtitle burn or the null pass-through above).
+            fallbackFilters.push(`[vsub]null[vout]`);
+          }
+
+          const interstitialExtraFb = fallbackPlan
+            ? fallbackInterstitial.segments
+              .filter((s) => s.type === 'window')
+              .reduce((sum, s) => sum + s.duration, 0)
+            : 0;
+          const fallbackAudioMap = fallbackPlan ? `[iall]` : `${audioMapIndex}:a:0`;
+
           cmd.complexFilter(fallbackFilters)
             .outputOptions([
-              '-t', String(duration),
+              '-t', String(duration + interstitialExtraFb),
               '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
               '-c:a', 'aac', '-b:a', '192k',
               '-map', '[vout]',
-              '-map', `${audioMapIndex}:a:0`,
+              '-map', fallbackAudioMap,
               '-shortest',
               '-movflags', '+faststart'
             ])

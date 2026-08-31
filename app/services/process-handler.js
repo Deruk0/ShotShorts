@@ -7,10 +7,12 @@ const { MediaProcessor } = require('./media-processor');
 const { WhisperService } = require('./whisper-service');
 const { GroqStoryAnalyzer } = require('./groq-story-analyzer');
 const { FontManager } = require('./font-manager');
-const { getProxy, getGroqApiKeys } = require('./store');
+const { getProxy } = require('./store');
 const { isAbortError, runFfmpegCommand, throwIfAborted } = require('./cancellation');
 const { alignStoriesToTranscript } = require('./story-padding');
 const { buildStoryChunks } = require('./story-chunker');
+const { computeBannerLayout, isImageBanner, hasAlphaPixFmt } = require('./banner-utils');
+const { resolveModelChain } = require('./model-registry');
 
 let processor = null;
 let isRunning = false;
@@ -44,7 +46,10 @@ function buildSubtitleOptions(config) {
     karaokeEffects: Array.isArray(config.subtitleKaraokeEffects) && config.subtitleKaraokeEffects.length > 0
       ? config.subtitleKaraokeEffects
       : ['highlight'],
-    caseName: config.subtitleCase || 'sentence'
+    caseName: config.subtitleCase || 'sentence',
+    customPos: !!config.subtitleCustomPos,
+    customX: Number(config.subtitleX || 540),
+    customY: Number(config.subtitleY || 1850)
   };
 }
 
@@ -102,9 +107,14 @@ function register() {
       if (!fs.existsSync(config.outputFolder)) fs.mkdirSync(config.outputFolder, { recursive: true });
 
       const proxy = await getProxy();
-      const groqApiKeys = await getGroqApiKeys();
-      if (!Array.isArray(groqApiKeys) || groqApiKeys.length === 0) {
-        return { success: false, error: 'No Groq API keys configured. Add at least one in Settings.' };
+      const customModelList = Array.isArray(config.customModels) ? config.customModels : [];
+      const customProviderList = Array.isArray(config.customProviders) ? config.customProviders : [];
+      // Fallback chains: ordered model lists; when one model hits limits the
+      // pipeline switches to the next entry automatically.
+      const transcriptionModels = resolveModelChain(customModelList, customProviderList, config.transcriptionChain || []);
+      const analysisModels = resolveModelChain(customModelList, customProviderList, config.analysisChain || []);
+      if (!transcriptionModels.length || !analysisModels.length) {
+        return { success: false, error: 'No AI model selected. Build the transcription and analysis chains in Settings → Custom AI Models.' };
       }
 
       send({ step: 'Extracting Audio', percent: 2, message: 'Preparing source media…' });
@@ -122,19 +132,19 @@ function register() {
       if (whisperAudioPath) tempFiles.push(whisperAudioPath);
 
       const subtitlesEnabled = !!config.subtitlesEnabled;
-      const subtitleModel = config.subtitleModel || 'whisper-large-v3';
       const subtitleLanguage = config.subtitleLanguage || 'ru';
       const subtitleOffsetSec = Number(config.subtitleOffsetMs || 0) / 1000;
       const subtitleOptions = buildSubtitleOptions(config);
 
       const whisper = new WhisperService();
-      whisper.setApiKeys(groqApiKeys);
       whisper.setProxy(proxy);
 
-      send({ step: 'Transcribing Audio', percent: 12, message: `Sending audio to Groq Whisper (${subtitleModel})…` });
+      const transcriptionLabel = transcriptionModels.map((entry) => `${entry.name} (${entry.modelId})`).join(' → ');
+
+      send({ step: 'Transcribing Audio', percent: 12, message: `Sending audio to ${transcriptionLabel}…` });
       const transcriptSegments = await whisper.transcribe(
         whisperAudioPath,
-        { model: subtitleModel, language: subtitleLanguage, apiKeys: groqApiKeys, proxy, signal },
+        { language: subtitleLanguage, proxy, signal, models: transcriptionModels },
         (msg) => send({ step: 'Transcribing Audio', percent: 20, message: msg })
       );
       throwIfAborted(signal);
@@ -143,8 +153,9 @@ function register() {
         return { success: false, error: 'Whisper returned no transcript.' };
       }
 
-      send({ step: 'Analyzing Stories', percent: 30, message: 'Compressing transcript for Qwen…' });
-      const analyzer = new GroqStoryAnalyzer(groqApiKeys, proxy);
+      send({ step: 'Analyzing Stories', percent: 30, message: 'Compressing transcript for analysis…' });
+      const analyzer = new GroqStoryAnalyzer([], proxy, null);
+      analyzer.setModelChain(analysisModels);
       const analysis = await analyzer.analyzeTranscript(
         transcriptSegments,
         sourceAudioDuration,
@@ -200,6 +211,82 @@ function register() {
 
       const outputFiles = [];
       const subtitleFailures = [];
+      let bannerOptions = null;
+      if (config.bannerEnabled && config.bannerPath) {
+        const bannerOpacityPct = Math.max(0, Math.min(100, Number(config.bannerOpacity === undefined ? 100 : config.bannerOpacity)));
+        if (bannerOpacityPct <= 0) {
+          send({ step: 'Banner Hidden', percent: 50, message: 'Banner visibility is 0% — rendering without banner.' });
+        } else {
+          try {
+            throwIfAborted(signal);
+            if (!fs.existsSync(config.bannerPath)) throw new Error('banner file not found');
+            const dims = await mp.getMediaDimensions(config.bannerPath);
+            const layout = computeBannerLayout(
+              { x: config.bannerX, y: config.bannerY, width: config.bannerWidth, height: config.bannerHeight },
+              dims.width,
+              dims.height
+            );
+            // Interstitial pauses only work with video banners: an image has
+            // neither motion nor sound to fill the pause. The pause lasts
+            // exactly as long as the banner video itself.
+            const interstitialDuration = Number(dims.durationSec);
+            const interstitialVideo = config.bannerMode === 'interstitial' && !isImageBanner(config.bannerPath);
+            if (interstitialVideo && !(interstitialDuration > 0)) {
+              send({ step: 'Banner', percent: 50, message: 'Banner video duration is unknown — falling back to overlay mode.' });
+            }
+            const interstitial = interstitialVideo && interstitialDuration > 0
+              ? {
+                intervalSec: Math.max(1, Number(config.bannerIntervalSec) || 60),
+                durationSec: interstitialDuration
+              }
+              : null;
+            bannerOptions = {
+              path: config.bannerPath,
+              isImage: isImageBanner(config.bannerPath),
+              layout,
+              opacity: bannerOpacityPct / 100,
+              bannerHasAudio: !!dims.hasAudio,
+              interstitial
+            };
+            if (interstitial && !dims.hasAudio) {
+              send({ step: 'Banner', percent: 50, message: 'Banner video has no audio track — the pause will be silent.' });
+            }
+            // Real-world video banners (edit lists, VFR, rotation, odd sizes,
+            // exotic codecs) get normalized once so looping always works.
+            // Alpha sources (ProRes 4444, VP9 alpha) are passed through as-is:
+            // the webm alpha round-trip loses transparency, while direct
+            // overlay keeps it. Normalization also strips audio and caps the
+            // length, so it must not run for interstitial banners.
+            if (!bannerOptions.isImage && !interstitial && dims.codecName !== 'gif' && !hasAlphaPixFmt(dims.pixFmt)) {
+              try {
+                throwIfAborted(signal);
+                const normalized = await mp.normalizeBannerVideo(bannerOptions.path, dims, (msg) => send({ step: 'Preparing Banner', percent: 50, message: msg }));
+                if (normalized && fs.existsSync(normalized)) {
+                  tempFiles.push(normalized);
+                  bannerOptions.path = normalized;
+                }
+              } catch (normErr) {
+                if (isAbortError(normErr) || signal.aborted) throw normErr;
+                send({ step: 'Banner', percent: 50, message: `Banner normalization failed (${normErr.message}). Using original file.` });
+              }
+            }
+            send({ step: 'Banner Ready', percent: 50, message: `Banner ${layout.width}x${layout.height} at ${layout.x},${layout.y} · ${bannerOpacityPct}%` });
+          } catch (bannerErr) {
+            if (isAbortError(bannerErr) || signal.aborted) throw bannerErr;
+            send({ step: 'Banner Skipped', percent: 50, message: `Banner disabled: ${bannerErr.message}. Rendering without banner.` });
+            bannerOptions = null;
+          }
+        }
+      }
+
+      // Interstitial windows extend the output timeline: subtitles must skip
+      // over the pause windows so they never render on top of the banner.
+      // The pause configuration lives on bannerOptions (probed banner
+      // duration) — this block must stay after the banner preparation above.
+      if (bannerOptions?.interstitial) {
+        subtitleOptions.interstitial = bannerOptions.interstitial;
+      }
+
       const basePercent = 50;
       const perChunkPercent = 45 / Math.max(chunks.length, 1);
       for (let i = 0; i < chunks.length; i++) {
@@ -257,7 +344,8 @@ function register() {
           config.outputFolder,
           sp,
           subtitlePath,
-          subtitleOptions
+          subtitleOptions,
+          bannerOptions
         );
         throwIfAborted(signal);
         outputFiles.push(out);

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com" />
   <title>ShotShorts</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -60,7 +60,7 @@
           </div>
         </div>
 
-        <p class="warning" id="no-keys-warning" style="display:none">Add your Groq API key in Settings before generating.</p>
+        <p class="warning" id="no-keys-warning" style="display:none">Add at least one AI model in Settings before generating.</p>
 
         <div id="progress-container" class="progress-container" style="display:none">
           <div class="progress-step" id="progress-step"></div>
@@ -141,19 +141,69 @@
           <button class="btn btn-secondary" id="btn-save-preset" disabled>Save Current</button>
           <button class="btn btn-danger" id="btn-delete-preset" disabled>Delete Preset</button>
         </div>
-        <p class="hint" id="presets-hint">Create presets to save API keys, proxy, subtitle settings, language, and selected folders/files.</p>
+        <p class="hint" id="presets-hint">Create presets to save AI models, proxy, subtitle settings, language, and selected folders/files.</p>
       </div>
 
       <div class="divider"></div>
 
-      <div class="settings-section" id="keys-section-groq">
-        <div class="section-title" id="txt-api-keys-title">Groq API Keys</div>
-        <div class="input-row">
-          <input type="password" id="key-input" placeholder="gsk_… paste Groq API key here" />
-          <button class="btn btn-primary" id="btn-add-key" disabled>Add</button>
+      <div class="settings-section">
+        <div class="section-title" id="txt-custom-models-title">Custom AI Models</div>
+        <p class="hint" id="custom-models-hint" style="margin-top:0">A provider holds the shared Base URL and API key — add several models to one provider to reuse the same credentials. Build fallback chains so generation automatically switches to the next model when one hits limits.</p>
+
+        <p class="subsection-title">1. <span id="txt-prov-title">Providers</span></p>
+        <div class="custom-model-form">
+          <div class="field-group">
+            <label class="field-label" id="txt-cp-name" for="cp-name">Name (optional)</label>
+            <input type="text" id="cp-name" placeholder="Groq" />
+          </div>
+          <div class="field-group">
+            <label class="field-label" id="txt-cp-url" for="cp-url">Base URL</label>
+            <input type="text" id="cp-url" placeholder="https://api.groq.com/openai/v1" />
+          </div>
+          <div class="field-group">
+            <label class="field-label" id="txt-cp-key" for="cp-key">API Key</label>
+            <input type="password" id="cp-key" placeholder="gsk_…" />
+          </div>
+          <button class="btn btn-primary" id="btn-add-provider" disabled>Add Provider</button>
         </div>
-        <div class="key-list" id="key-list"></div>
-        <p class="hint" id="keys-hint">Add one or more Groq keys. Whisper and Qwen will automatically switch keys when one hits a limit.</p>
+        <div class="key-list" id="provider-list"></div>
+
+        <p class="subsection-title">2. <span id="txt-models-title">Models</span></p>
+        <div class="custom-model-form">
+          <div class="field-group">
+            <label class="field-label" id="txt-cm-provider" for="cm-provider">Provider</label>
+            <select id="cm-provider" class="strict-select"></select>
+          </div>
+          <div class="field-group">
+            <label class="field-label" id="txt-cm-model" for="cm-model">Model ID</label>
+            <input type="text" id="cm-model" placeholder="whisper-large-v3" />
+          </div>
+          <div class="field-group">
+            <label class="field-label" id="txt-cm-name" for="cm-name">Display name (optional)</label>
+            <input type="text" id="cm-name" placeholder="Whisper Large v3" />
+          </div>
+          <button class="btn btn-primary" id="btn-add-model" disabled>Add Model</button>
+        </div>
+        <div class="key-list" id="custom-model-list"></div>
+
+        <p class="subsection-title">3. <span id="txt-chains-title">Fallback chains</span></p>
+        <div class="chain-block">
+          <label class="field-label" id="txt-chain-tc" for="chain-tc-select">Transcription chain</label>
+          <div class="input-row">
+            <select id="chain-tc-select" class="strict-select"></select>
+            <button class="btn btn-secondary" id="btn-chain-tc-add" disabled>Add</button>
+          </div>
+          <div class="key-list" id="chain-tc-list"></div>
+        </div>
+        <div class="chain-block" style="margin-top:16px;">
+          <label class="field-label" id="txt-chain-ac" for="chain-ac-select">Analysis chain</label>
+          <div class="input-row">
+            <select id="chain-ac-select" class="strict-select"></select>
+            <button class="btn btn-secondary" id="btn-chain-ac-add" disabled>Add</button>
+          </div>
+          <div class="key-list" id="chain-ac-list"></div>
+        </div>
+        <p class="hint" id="chains-hint" style="margin-top:10px;">Models are tried in order: when one hits rate limits or fails, the next one takes over automatically.</p>
       </div>
 
       <div class="divider"></div>
@@ -203,9 +253,8 @@
           <div class="proxy-grid">
             <div class="field-group">
               <label class="field-label" id="txt-sub-model" for="subtitle-model">Model Quality</label>
-              <select id="subtitle-model" class="strict-select">
-                <option value="whisper-large-v3" selected>Whisper Large v3</option>
-                <option value="whisper-large-v3-turbo">Whisper Large v3 Turbo</option>
+              <select id="subtitle-model" class="strict-select" disabled>
+                <option value="" selected>Set in Custom AI Models → Transcription chain</option>
               </select>
             </div>
             <div class="field-group">
@@ -255,15 +304,19 @@
               <label class="field-label" id="txt-sub-font">Font Size</label>
               <input type="number" id="subtitle-font-size" min="12" max="72" value="20" />
             </div>
-            <div class="field-group">
+            <div class="field-group" id="subtitle-margin-group">
               <label class="field-label" id="txt-sub-margin">Vertical Margin</label>
               <input type="number" id="subtitle-margin-v" min="10" max="900" value="40" />
+            </div>
+            <div class="field-group" style="grid-column: 1 / -1; margin-top: 4px;">
+              <label class="toggle-label"><input type="checkbox" id="subtitle-custom-pos" /> <span id="txt-sub-custom-pos">Custom position (drag in preview)</span></label>
+              <p class="hint" id="txt-sub-custom-pos-hint" style="margin-top:6px;">Drag the text in the live preview; the corner handle scales it proportionally (both axes together). While enabled, Position and Vertical Margin above are ignored.</p>
             </div>
           </div>
 
           <p class="subsection-title">3. Макет</p>
           <div class="proxy-grid">
-            <div class="field-group">
+            <div class="field-group" id="subtitle-position-group">
               <label class="field-label" id="txt-sub-position" for="subtitle-position">Position</label>
               <select id="subtitle-position" class="strict-select">
                 <option value="bottom" selected>Bottom</option>
@@ -306,16 +359,80 @@
             </div>
           </div>
           <div class="subtitle-preview-card">
-            <div class="subtitle-preview-head">Live Subtitle Preview</div>
+            <div class="subtitle-preview-head">
+              <span id="txt-live-preview-title">Live Preview</span>
+              <span class="preview-drag-hint" id="preview-drag-hint" style="display:none">banner: drag to move · corner to resize</span>
+            </div>
             <div class="subtitle-preview-stage" id="subtitle-preview-stage">
               <div class="subtitle-preview-frame" id="subtitle-preview-frame">
                 <div class="subtitle-preview-overlay" id="subtitle-preview-overlay">
                   <span id="subtitle-preview-text">Это предпросмотр субтитров</span>
+                  <div class="subtitle-preview-handle" id="subtitle-preview-handle" title="Scale text"></div>
+                </div>
+                <div class="banner-preview-item" id="banner-preview-item" style="display:none">
+                  <div class="banner-preview-media" id="banner-preview-media"></div>
+                  <div class="banner-handle" data-axis="e" title="Stretch width"></div>
+                  <div class="banner-handle" data-axis="s" title="Stretch height"></div>
+                  <div class="banner-handle" data-axis="se" title="Scale proportionally"></div>
                 </div>
               </div>
             </div>
           </div>
-          <p class="hint" id="txt-sub-hint" style="margin-top:8px">Whisper and Qwen both run through Groq. The transcript is generated once and then reused for subtitles and story analysis.</p>
+          <p class="hint" id="txt-sub-hint" style="margin-top:8px">The transcript is generated once with the selected transcription model and then reused for subtitles and story analysis.</p>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="settings-section">
+        <div class="section-title" style="justify-content:space-between">
+          <span id="txt-banner-title">Ad Banner</span>
+          <label class="toggle-label"><input type="checkbox" id="banner-toggle" /> <span id="txt-enable-banner">Enable</span></label>
+        </div>
+        <div id="banner-fields" style="opacity:0.4;pointer-events:none">
+          <div class="file-picker" id="pick-banner">
+            <div>
+              <span class="label" id="banner-label">Click to select a banner image or short video…</span>
+            </div>
+          </div>
+          <div class="banner-controls-row">
+            <div class="field-group banner-size-group">
+              <label class="field-label" id="txt-banner-width" for="banner-width">Width (px)</label>
+              <input type="number" id="banner-width" min="20" max="2160" step="10" value="300" />
+            </div>
+            <div class="field-group banner-size-group">
+              <label class="field-label" id="txt-banner-height" for="banner-height">Height (px)</label>
+              <input type="number" id="banner-height" min="20" max="3840" step="10" value="150" />
+            </div>
+            <button class="btn btn-secondary" id="btn-reset-banner" disabled>Reset</button>
+            <button class="btn btn-danger" id="btn-remove-banner" disabled>Remove Banner</button>
+          </div>
+          <div class="banner-opacity-row">
+            <div class="field-group banner-opacity-group">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                <label class="field-label" id="txt-banner-opacity" for="banner-opacity" style="margin-bottom:0;">Visibility</label>
+                <span id="banner-opacity-value" style="font-size:12px; font-weight:bold; color:var(--accent, #ffc600);">100%</span>
+              </div>
+              <input type="range" id="banner-opacity" class="app-slider" min="0" max="100" step="5" value="100" style="width:100%;" />
+            </div>
+          </div>
+          <div class="banner-interstitial-block">
+            <div class="proxy-grid">
+              <div class="field-group">
+                <label class="field-label" id="txt-banner-mode" for="banner-mode">Show Mode</label>
+                <select id="banner-mode" class="strict-select">
+                  <option value="overlay" selected>Always visible (overlay)</option>
+                  <option value="interstitial">Pause video &amp; play banner with sound</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label class="field-label" id="txt-banner-interval" for="banner-interval-sec">Pause every (sec)</label>
+                <input type="number" id="banner-interval-sec" min="5" max="3600" step="5" value="60" />
+              </div>
+            </div>
+            <p class="hint" id="txt-banner-interstitial-hint" style="margin-top:8px;">Pause mode (video banners only): every N seconds the clip pauses while the banner video plays once with its own sound — the pause lasts exactly as long as the banner video. Then the clip resumes where it stopped. Requires an interval shorter than the clip.</p>
+          </div>
+          <p class="hint" id="txt-banner-hint">The banner is overlaid on every clip for its full duration. Video banners loop automatically.</p>
         </div>
       </div>
 
@@ -348,7 +465,7 @@
     <!-- STATUS BAR -->
     <div class="status-bar">
       <div class="status-indicator"><span class="status-dot idle" id="status-dot"></span> <span id="status-text">Ready</span></div>
-      <span id="key-count">0 API keys configured</span>
+      <span id="key-count">No AI models</span>
     </div>
   </div>
 

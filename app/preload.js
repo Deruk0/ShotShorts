@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('api', {
   openFile: (filters) => ipcRenderer.invoke('dialog:openFile', filters),
   openFolder: () => ipcRenderer.invoke('dialog:openFolder'),
   selectOutputFolder: () => ipcRenderer.invoke('dialog:selectOutputFolder'),
+  probeMedia: (filePath) => ipcRenderer.invoke('media:probe', filePath),
 
   startProcessing: (config) => ipcRenderer.invoke('process:start', config),
   cancelProcessing: () => ipcRenderer.send('process:cancel'),

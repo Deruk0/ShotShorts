@@ -3,6 +3,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const appDir = path.resolve(__dirname, '..');
+const repoDir = path.resolve(appDir, '..');
 const resourcesDir = path.join(appDir, 'resources');
 const warnOnly = process.argv.includes('--warn-only') || process.env.SHOTSHORTS_ALLOW_UNBUNDLED_FFMPEG === '1';
 
@@ -10,6 +11,41 @@ const required = [
   path.join(resourcesDir, 'ffmpeg.exe'),
   path.join(resourcesDir, 'ffprobe.exe')
 ];
+
+function readVersion(packagePath) {
+  const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+  return typeof pkg.version === 'string' ? pkg.version : null;
+}
+
+function checkVersionsMatch() {
+  const appVersion = readVersion(path.join(appDir, 'package.json'));
+  const rootVersion = readVersion(path.join(repoDir, 'package.json'));
+
+  if (!appVersion || !rootVersion) {
+    console.warn('[ShotShorts] Could not read version from package.json files, skipping version check.');
+    return;
+  }
+
+  if (appVersion !== rootVersion) {
+    const message = [
+      '[ShotShorts] Version check failed.',
+      '',
+      `Root package.json version:     ${rootVersion}`,
+      `app/package.json version:      ${appVersion}`,
+      '',
+      'Fix: keep both versions in sync (the portable exe name uses the app version).'
+    ].join('\n');
+
+    if (warnOnly) {
+      console.warn(message);
+    } else {
+      console.error(message);
+      process.exit(1);
+    }
+  } else {
+    console.log(`[ShotShorts] Version check OK (${appVersion}).`);
+  }
+}
 
 function findOnPath(fileName) {
   try {
@@ -29,6 +65,8 @@ function findOnPath(fileName) {
 function relative(filePath) {
   return path.relative(appDir, filePath).replace(/\\/g, '/');
 }
+
+checkVersionsMatch();
 
 for (const targetPath of required) {
   if (fs.existsSync(targetPath)) continue;

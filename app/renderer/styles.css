@@ -711,6 +711,14 @@ select optgroup {
   cursor: pointer; font-size: 10px; transition: all var(--transition); border-radius: var(--radius-sm);
 }
 .key-tag .remove:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
+.key-tag .move {
+  width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
+  background: transparent; border: 1px solid var(--border-color); color: var(--text-muted);
+  cursor: pointer; font-size: 10px; line-height: 1; transition: all var(--transition); border-radius: var(--radius-sm);
+}
+.key-tag .move:hover { background: var(--accent); color: var(--bg-input); border-color: var(--accent); }
+.key-tag .move:disabled { opacity: 0.35; cursor: default; pointer-events: none; }
+.key-tag .chain-order { color: var(--accent); font-weight: 700; }
 
 .hint { font-size: 12px; line-height: 1.5; font-family: var(--font-sans); color: var(--text-muted); margin-top: 10px; }
 .warning { font-size: 12px; line-height: 1.45; font-family: var(--font-sans); color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid var(--accent); border-radius: var(--radius-md); padding: 10px 12px; text-align: left; font-weight: 500; }
@@ -860,6 +868,10 @@ input[type="range"].app-slider::-moz-range-thumb:hover { background: var(--accen
   max-height: 60px;
 }
 .subtitle-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-family: var(--font-sans);
   font-size: 12px;
   font-weight: 600;
@@ -867,6 +879,11 @@ input[type="range"].app-slider::-moz-range-thumb:hover { background: var(--accen
   border-bottom: 1px solid var(--border-color);
   padding: 8px 10px;
   background: #0a0a0c;
+}
+.preview-drag-hint {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-muted);
 }
 .subtitle-preview-stage {
   position: relative;
@@ -898,6 +915,9 @@ input[type="range"].app-slider::-moz-range-thumb:hover { background: var(--accen
   letter-spacing: 0.2px;
   white-space: normal;
   word-break: break-word;
+  /* Inert unless free positioning is active (.free-pos) so the draggable
+     banner underneath is never blocked. */
+  pointer-events: none;
   text-shadow:
     -1px -1px 0 rgba(0,0,0,0.95),
     1px -1px 0 rgba(0,0,0,0.95),
@@ -993,10 +1013,123 @@ input[type="range"].app-slider::-moz-range-thumb:hover { background: var(--accen
 .subtitle-preview-overlay.preview-style-highlight .subtitle-preview-word.mode-highlight {
   color: #ffe066;
 }
+/* Free subtitle positioning: the block hugs its text and is centered on
+   (subtitleX, subtitleY) via inline translate(-50%,-50%). Pointer events
+   stay off unless free positioning is active so the banner stays grabbable. */
+.subtitle-preview-overlay.free-pos {
+  right: auto;
+  width: max-content;
+  max-width: 1000px;
+  pointer-events: auto;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  border: 4px dashed transparent;
+}
+.subtitle-preview-overlay.free-pos:hover { border-color: rgba(255, 255, 255, 0.35); }
+.subtitle-preview-overlay.dragging { cursor: grabbing; border-color: var(--accent); }
+.subtitle-preview-handle {
+  position: absolute;
+  right: -30px;
+  bottom: -30px;
+  width: 56px;
+  height: 56px;
+  background: var(--accent);
+  border: 4px solid #0b0b0f;
+  border-radius: 50%;
+  cursor: nwse-resize;
+  touch-action: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  z-index: 5;
+}
+.subtitle-preview-overlay.free-pos:hover .subtitle-preview-handle,
+.subtitle-preview-overlay.dragging .subtitle-preview-handle {
+  opacity: 1;
+}
 
 /* ===== SETTINGS ===== */
 .settings-section { margin-bottom: 32px; }
 .settings-section:last-child { margin-bottom: 0; }
+
+/* ===== CUSTOM AI MODELS ===== */
+.custom-model-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 14px;
+}
+.custom-model-form .field-group { margin-bottom: 0; }
+.custom-model-form .btn { grid-column: 1 / -1; justify-content: center; }
+
+/* ===== BANNER PREVIEW ===== */
+.banner-controls-row {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  margin-top: 12px;
+}
+.banner-controls-row .field-group { margin-bottom: 0; }
+.banner-size-group { flex: 0 0 140px; }
+.banner-opacity-row { display: flex; margin-top: 12px; }
+.banner-opacity-group { flex: 1; margin-bottom: 0; }
+.banner-preview-item {
+  position: absolute;
+  background-color: rgba(255, 255, 255, 0.08);
+  border: 4px dashed rgba(255, 255, 255, 0.55);
+  box-sizing: border-box;
+  cursor: grab;
+  touch-action: none;
+}
+.banner-preview-media {
+  position: absolute;
+  inset: 0;
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+.banner-preview-item.has-media {
+  background-color: transparent;
+  border: 4px solid rgba(255, 255, 255, 0.35);
+}
+.banner-preview-item.dragging { cursor: grabbing; border-color: var(--accent); }
+.banner-handle {
+  position: absolute;
+  background: var(--accent);
+  border: 4px solid #0b0b0f;
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  touch-action: none;
+  z-index: 5;
+}
+.banner-preview-item:hover .banner-handle,
+.banner-preview-item.dragging .banner-handle {
+  opacity: 1;
+}
+.banner-handle[data-axis="e"] {
+  right: -30px;
+  top: 50%;
+  width: 52px;
+  height: 52px;
+  transform: translateY(-50%);
+  cursor: ew-resize;
+}
+.banner-handle[data-axis="s"] {
+  bottom: -30px;
+  left: 50%;
+  width: 52px;
+  height: 52px;
+  transform: translateX(-50%);
+  cursor: ns-resize;
+}
+.banner-handle[data-axis="se"] {
+  right: -32px;
+  bottom: -32px;
+  width: 64px;
+  height: 64px;
+  cursor: nwse-resize;
+}
 
 /* ===== ANIMATION ===== */
 @keyframes slideUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }

@@ -3,6 +3,7 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const { normalizeGroqApiKeys, pickAvailableGroqKey, setGroqKeyCooldown } = require('./groq-key-utils');
 const { abortableSleep, isAbortError, throwIfAborted } = require('./cancellation');
+const { normalizeBaseUrl } = require('./model-registry');
 
 const GROQ_QWEN_MODEL = 'qwen/qwen3.6-27b';
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -132,6 +133,10 @@ function isRateLimitError(err) {
   return err?.response?.status === 429;
 }
 
+function isModelUnavailableError(err) {
+  return [401, 403, 404].includes(err?.response?.status);
+}
+
 function isJsonGenerationError(err) {
   if (err?.code === 'INVALID_MODEL_JSON') return true;
   if (err?.response?.status !== 400) return false;
@@ -244,9 +249,25 @@ class GroqStoryAnalyzer {
   static REFINEMENT_LOOKAHEAD_BLOCKS = 24;
   static MAX_REFINEMENT_BLOCKS = 64;
 
-  constructor(apiKeys, proxy) {
-    this.apiKeys = normalizeGroqApiKeys(apiKeys);
+  constructor(apiKeys, proxy, custom = null) {
+    this.custom = (custom && custom.baseUrl && custom.apiKey && custom.modelId) ? custom : null;
+    // Custom providers authenticate with their own single key; Groq keeps
+    // its multi-key rotation.
+    this.apiKeys = normalizeGroqApiKeys(this.custom ? [this.custom.apiKey] : apiKeys);
     this.proxy = proxy || null;
+    this.modelChain = [];
+    this._chainHasNext = false;
+  }
+
+  /**
+   * Ordered fallback chain of analysis models. Each entry:
+   * { name, baseUrl, apiKey, modelId }. When the active model hits rate
+   * limits or rejects the key, the next entry takes over.
+   */
+  setModelChain(entries) {
+    this.modelChain = (Array.isArray(entries) ? entries : [])
+      .filter((entry) => entry && entry.baseUrl && entry.apiKey && entry.modelId);
+    return this;
   }
 
   _buildAxiosConfig(signal) {
@@ -395,23 +416,27 @@ class GroqStoryAnalyzer {
   async _requestWindow(apiKey, prompt, reasoningEffort = 'default', signal, requestOptions = {}) {
     throwIfAborted(signal);
     const useJsonMode = requestOptions.useJsonMode !== false;
+    const url = this.custom ? `${normalizeBaseUrl(this.custom.baseUrl)}/chat/completions` : GROQ_CHAT_URL;
     const payload = {
-      model: GROQ_QWEN_MODEL,
+      model: this.custom ? this.custom.modelId : GROQ_QWEN_MODEL,
       messages: [
         {
           role: 'user',
           content: prompt
         }
       ],
-      reasoning_format: 'hidden',
-      reasoning_effort: reasoningEffort,
       temperature: 0.2,
       top_p: 0.9,
       max_completion_tokens: Math.max(2048, Number(requestOptions.maxCompletionTokens) || 4096)
     };
+    // Groq-specific reasoning controls are unknown to other providers.
+    if (!this.custom) {
+      payload.reasoning_format = 'hidden';
+      payload.reasoning_effort = reasoningEffort;
+    }
     if (useJsonMode) payload.response_format = { type: 'json_object' };
 
-    const response = await axios.post(GROQ_CHAT_URL, payload, {
+    const response = await axios.post(url, payload, {
       ...this._buildAxiosConfig(signal),
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -441,6 +466,13 @@ class GroqStoryAnalyzer {
   }
 
   async _requestWindowWithRetry(prompt, onProgress, label, signal) {
+    if (this.modelChain.length > 0) {
+      return this._requestWindowWithChain(prompt, onProgress, label, signal);
+    }
+    return this._requestWindowWithRetryLegacy(prompt, onProgress, label, signal);
+  }
+
+  async _requestWindowWithRetryLegacy(prompt, onProgress, label, signal) {
     let lastErr = null;
     const attempts = [
       { reasoningEffort: 'default', useJsonMode: true, description: 'reasoning + JSON mode' },
@@ -484,6 +516,9 @@ class GroqStoryAnalyzer {
           }
 
           if (isRateLimitError(err)) {
+            if (this._chainHasNext) {
+              throw err;
+            }
             if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
               throw err;
             }
@@ -508,6 +543,32 @@ class GroqStoryAnalyzer {
     }
 
     throw lastErr || new Error('Groq Qwen analysis failed');
+  }
+
+  /**
+   * Walk the model chain for one request window. Rate limits and
+   * unavailable models/keys (401/403/404) move execution to the next
+   * entry; the switch is sticky for all subsequent windows.
+   */
+  async _requestWindowWithChain(prompt, onProgress, label, signal) {
+    for (let index = 0; index < this.modelChain.length; index++) {
+      const entry = this.modelChain[index];
+      this.custom = entry;
+      this.apiKeys = normalizeGroqApiKeys([entry.apiKey]);
+      this._chainHasNext = index < this.modelChain.length - 1;
+      try {
+        return await this._requestWindowWithRetryLegacy(prompt, onProgress, label, signal);
+      } catch (err) {
+        if (isAbortError(err) || isPayloadTooLargeError(err) || isJsonGenerationError(err)) throw err;
+        const switchable = isRateLimitError(err) || isModelUnavailableError(err);
+        if (switchable && this._chainHasNext) {
+          onProgress?.(`${label}: model ${entry.name} is unavailable — switching to ${this.modelChain[index + 1].name}…`);
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error(`${label}: all models in the analysis chain failed`);
   }
 
   _splitWindow(window) {
@@ -802,8 +863,8 @@ class GroqStoryAnalyzer {
     const signal = options.signal;
     throwIfAborted(signal);
 
-    if (!this.apiKeys.length) {
-      throw new Error('Groq API keys not set. Add at least one in Settings.');
+    if (!this.modelChain.length && !this.apiKeys.length) {
+      throw new Error('No analysis model configured. Build the analysis chain in Settings.');
     }
 
     const blocks = this.buildTranscriptBlocks(transcriptSegments);

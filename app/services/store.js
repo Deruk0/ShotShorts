@@ -1,32 +1,19 @@
 let storeInstance = null;
 
-function normalizeGroqApiKeys(apiKeys, legacyKey = '') {
-  const merged = [];
-
-  if (Array.isArray(apiKeys)) {
-    merged.push(...apiKeys);
-  }
-  if (typeof legacyKey === 'string' && legacyKey.trim()) {
-    merged.push(legacyKey);
-  }
-
-  return [...new Set(
-    merged
-      .map((key) => String(key || '').trim())
-      .filter(Boolean)
-      .filter((key) => !key.startsWith('AIzaSy'))
-  )];
-}
-
 async function getStore() {
   if (!storeInstance) {
     const { default: Store } = await import('electron-store');
     const schema = {
-      apiProvider: { type: 'string', default: 'groq' },
-      apiKeys: {
+      customProviders: {
         type: 'array',
         items: {
-          type: 'string'
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            name: { type: 'string' },
+            baseUrl: { type: 'string' },
+            apiKey: { type: 'string' }
+          }
         },
         default: []
       },
@@ -43,7 +30,6 @@ async function getStore() {
       },
       subtitlesEnabled: { type: 'boolean', default: false },
       subtitleStyle: { type: 'string', default: 'Classic' },
-      subtitleModel: { type: 'string', default: 'whisper-large-v3' },
       subtitleLanguage: { type: 'string', default: 'ru' },
       subtitlePosition: { type: 'string', default: 'bottom' },
       subtitleWordsPerLine: { type: 'number', default: 3 },
@@ -60,7 +46,43 @@ async function getStore() {
       },
       subtitleCase: { type: 'string', default: 'sentence' },
       subtitleOffsetMs: { type: 'number', default: 0 },
-      groqApiKey: { type: 'string', default: '' },
+      subtitleCustomPos: { type: 'boolean', default: false },
+      subtitleX: { type: 'number', default: 540 },
+      subtitleY: { type: 'number', default: 1850 },
+      analysisModelKey: { type: 'string', default: '' },
+      transcriptionChain: {
+        type: 'array',
+        items: { type: 'string' },
+        default: []
+      },
+      analysisChain: {
+        type: 'array',
+        items: { type: 'string' },
+        default: []
+      },
+      customModels: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            providerId: { type: 'string' },
+            name: { type: 'string' },
+            modelId: { type: 'string' }
+          }
+        },
+        default: []
+      },
+      bannerEnabled: { type: 'boolean', default: false },
+      bannerPath: { type: 'string', default: '' },
+      bannerX: { type: 'number', default: 740 },
+      bannerY: { type: 'number', default: 60 },
+      bannerWidth: { type: 'number', default: 300 },
+      bannerHeight: { type: 'number', default: 150 },
+      bannerOpacity: { type: 'number', default: 100 },
+      bannerMode: { type: 'string', default: 'overlay' },
+      bannerIntervalSec: { type: 'number', default: 60 },
+      bannerDurationSec: { type: 'number', default: 5 },
       appLanguage: { type: 'string', default: 'en' },
       appTheme: { type: 'string', default: 'dark' },
       activePresetId: {
@@ -92,15 +114,35 @@ async function getStore() {
 
 async function getSettings() {
   const store = await getStore();
-  const apiKeys = normalizeGroqApiKeys(store.get('apiKeys'), store.get('groqApiKey'));
+
+  // Legacy layouts (models carrying their own baseUrl/apiKey, single-model
+  // selects) are migrated once to providers + models + fallback chains.
+  const raw = {
+    customProviders: store.get('customProviders'),
+    customModels: store.get('customModels'),
+    transcriptionChain: store.get('transcriptionChain'),
+    analysisChain: store.get('analysisChain'),
+    subtitleModel: store.get('subtitleModel'),
+    analysisModelKey: store.get('analysisModelKey')
+  };
+  const { migrateLegacyModels, normalizeCustomProviders, normalizeCustomModels, normalizeModelKeyList } = require('./model-registry');
+  const migrated = migrateLegacyModels(raw);
+  if (migrated) {
+    store.set('customProviders', migrated.customProviders);
+    store.set('customModels', migrated.customModels);
+    store.set('transcriptionChain', migrated.transcriptionChain);
+    store.set('analysisChain', migrated.analysisChain);
+  }
+
+  const customProviders = normalizeCustomProviders(store.get('customProviders'));
+  const customModels = normalizeCustomModels(store.get('customModels'), customProviders);
+  const transcriptionChain = normalizeModelKeyList(store.get('transcriptionChain'));
+  const analysisChain = normalizeModelKeyList(store.get('analysisChain'));
 
   return {
-    apiProvider: store.get('apiProvider'),
-    apiKeys,
     proxy: store.get('proxy'),
     subtitlesEnabled: store.get('subtitlesEnabled'),
     subtitleStyle: store.get('subtitleStyle'),
-    subtitleModel: store.get('subtitleModel'),
     subtitleLanguage: store.get('subtitleLanguage'),
     subtitlePosition: store.get('subtitlePosition'),
     subtitleWordsPerLine: store.get('subtitleWordsPerLine'),
@@ -113,7 +155,23 @@ async function getSettings() {
     subtitleKaraokeEffects: store.get('subtitleKaraokeEffects'),
     subtitleCase: store.get('subtitleCase'),
     subtitleOffsetMs: store.get('subtitleOffsetMs'),
-    groqApiKey: apiKeys[0] || '',
+    subtitleCustomPos: store.get('subtitleCustomPos'),
+    subtitleX: store.get('subtitleX'),
+    subtitleY: store.get('subtitleY'),
+    customProviders,
+    customModels,
+    transcriptionChain,
+    analysisChain,
+    bannerEnabled: store.get('bannerEnabled'),
+    bannerPath: store.get('bannerPath'),
+    bannerX: store.get('bannerX'),
+    bannerY: store.get('bannerY'),
+    bannerWidth: store.get('bannerWidth'),
+    bannerHeight: store.get('bannerHeight'),
+    bannerOpacity: store.get('bannerOpacity'),
+    bannerMode: store.get('bannerMode'),
+    bannerIntervalSec: store.get('bannerIntervalSec'),
+    bannerDurationSec: store.get('bannerDurationSec'),
     appLanguage: store.get('appLanguage'),
     appTheme: store.get('appTheme'),
     activePresetId: store.get('activePresetId'),
@@ -123,22 +181,12 @@ async function getSettings() {
 
 async function saveSettings(settings) {
   const store = await getStore();
-  if (settings.apiProvider !== undefined) store.set('apiProvider', settings.apiProvider);
-
-  if (settings.apiKeys !== undefined || settings.groqApiKey !== undefined) {
-    const normalizedKeys = settings.apiKeys !== undefined
-      ? normalizeGroqApiKeys(settings.apiKeys, settings.groqApiKey !== undefined ? settings.groqApiKey : '')
-      : normalizeGroqApiKeys([], settings.groqApiKey);
-    store.set('apiKeys', normalizedKeys);
-    store.set('groqApiKey', normalizedKeys[0] || '');
-  }
 
   if (settings.proxy !== undefined) {
     store.set('proxy', settings.proxy);
   }
   if (settings.subtitlesEnabled !== undefined) store.set('subtitlesEnabled', !!settings.subtitlesEnabled);
   if (settings.subtitleStyle !== undefined) store.set('subtitleStyle', settings.subtitleStyle);
-  if (settings.subtitleModel !== undefined) store.set('subtitleModel', settings.subtitleModel);
   if (settings.subtitleLanguage !== undefined) store.set('subtitleLanguage', settings.subtitleLanguage);
   if (settings.subtitlePosition !== undefined) store.set('subtitlePosition', settings.subtitlePosition);
   if (settings.subtitleWordsPerLine !== undefined) store.set('subtitleWordsPerLine', Number(settings.subtitleWordsPerLine));
@@ -156,6 +204,35 @@ async function saveSettings(settings) {
   }
   if (settings.subtitleCase !== undefined) store.set('subtitleCase', settings.subtitleCase);
   if (settings.subtitleOffsetMs !== undefined) store.set('subtitleOffsetMs', Number(settings.subtitleOffsetMs));
+  if (settings.subtitleCustomPos !== undefined) store.set('subtitleCustomPos', !!settings.subtitleCustomPos);
+  if (settings.subtitleX !== undefined) store.set('subtitleX', Number(settings.subtitleX));
+  if (settings.subtitleY !== undefined) store.set('subtitleY', Number(settings.subtitleY));
+  if (settings.customProviders !== undefined) {
+    const { normalizeCustomProviders } = require('./model-registry');
+    store.set('customProviders', normalizeCustomProviders(settings.customProviders));
+  }
+  if (settings.customModels !== undefined) {
+    const { normalizeCustomModels } = require('./model-registry');
+    store.set('customModels', normalizeCustomModels(settings.customModels, settings.customProviders || store.get('customProviders')));
+  }
+  if (settings.transcriptionChain !== undefined) {
+    const { normalizeModelKeyList } = require('./model-registry');
+    store.set('transcriptionChain', normalizeModelKeyList(settings.transcriptionChain));
+  }
+  if (settings.analysisChain !== undefined) {
+    const { normalizeModelKeyList } = require('./model-registry');
+    store.set('analysisChain', normalizeModelKeyList(settings.analysisChain));
+  }
+  if (settings.bannerEnabled !== undefined) store.set('bannerEnabled', !!settings.bannerEnabled);
+  if (settings.bannerPath !== undefined) store.set('bannerPath', String(settings.bannerPath || ''));
+  if (settings.bannerX !== undefined) store.set('bannerX', Number(settings.bannerX));
+  if (settings.bannerY !== undefined) store.set('bannerY', Number(settings.bannerY));
+  if (settings.bannerWidth !== undefined) store.set('bannerWidth', Number(settings.bannerWidth));
+  if (settings.bannerHeight !== undefined) store.set('bannerHeight', Number(settings.bannerHeight));
+  if (settings.bannerOpacity !== undefined) store.set('bannerOpacity', Number(settings.bannerOpacity));
+  if (settings.bannerMode !== undefined) store.set('bannerMode', ['overlay', 'interstitial'].includes(settings.bannerMode) ? settings.bannerMode : 'overlay');
+  if (settings.bannerIntervalSec !== undefined) store.set('bannerIntervalSec', Math.max(1, Math.min(3600, Number(settings.bannerIntervalSec) || 60)));
+  if (settings.bannerDurationSec !== undefined) store.set('bannerDurationSec', Math.max(1, Math.min(30, Number(settings.bannerDurationSec) || 5)));
   if (settings.appLanguage !== undefined) store.set('appLanguage', settings.appLanguage);
   if (settings.appTheme !== undefined) store.set('appTheme', settings.appTheme);
   if (settings.activePresetId !== undefined) store.set('activePresetId', settings.activePresetId || null);
@@ -165,23 +242,9 @@ async function saveSettings(settings) {
   }
 }
 
-async function getApiProvider() {
-  const store = await getStore();
-  return store.get('apiProvider');
-}
-
-async function getApiKeys() {
-  const store = await getStore();
-  return normalizeGroqApiKeys(store.get('apiKeys'), store.get('groqApiKey'));
-}
-
 async function getProxy() {
   const store = await getStore();
   return store.get('proxy');
-}
-
-async function getGroqApiKeys() {
-  return getApiKeys();
 }
 
 async function getStats() {
@@ -197,10 +260,7 @@ async function saveStats(stats) {
 module.exports = {
   getSettings,
   saveSettings,
-  getApiProvider,
-  getApiKeys,
   getProxy,
-  getGroqApiKeys,
   getStats,
   saveStats
 };
