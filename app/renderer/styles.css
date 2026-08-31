@@ -720,6 +720,51 @@ select optgroup {
 .key-tag .move:disabled { opacity: 0.35; cursor: default; pointer-events: none; }
 .key-tag .chain-order { color: var(--accent); font-weight: 700; }
 
+/* Collapsible subsections (providers / models / chains) */
+.subsection-title.collapsible-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.subsection-title.collapsible-title:hover { color: var(--text-primary); }
+.subsection-title.collapsible-title .chevron {
+  display: inline-block;
+  width: 10px;
+  font-size: 10px;
+  color: var(--text-muted);
+  transition: transform var(--transition);
+}
+.subsection-title.collapsible-title.collapsed .chevron { transform: rotate(-90deg); }
+.list-count { color: var(--text-muted); font-weight: 400; margin-left: 6px; }
+
+/* Chain list: one row per entry, two text columns (provider | model) that
+   truncate with ellipsis on narrow windows and leave free space on wide. */
+.chain-list {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+}
+.key-tag.chain-tag {
+  width: 100%;
+  box-sizing: border-box;
+  gap: 8px;
+}
+.chain-tag .chain-col {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chain-tag .chain-col.provider-col {
+  color: var(--text-secondary);
+}
+.chain-tag .chain-order,
+.chain-tag .move,
+.chain-tag .remove { flex: 0 0 auto; }
+
 .hint { font-size: 12px; line-height: 1.5; font-family: var(--font-sans); color: var(--text-muted); margin-top: 10px; }
 .warning { font-size: 12px; line-height: 1.45; font-family: var(--font-sans); color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid var(--accent); border-radius: var(--radius-md); padding: 10px 12px; text-align: left; font-weight: 500; }
 .subsection-title { margin: 16px 0 12px; font-family: var(--font-sans); font-size: 12px; font-weight: 600; color: var(--text-secondary); }

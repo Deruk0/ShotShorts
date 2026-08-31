@@ -10,6 +10,44 @@ const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const MAX_RATE_LIMIT_RETRIES = 8;
 const DEFAULT_RATE_LIMIT_DELAY_MS = 30000;
 
+// Static contracts live in the system role; the user message carries only
+// the dynamic data (core range, durations, transcript blocks).
+const SYSTEM_FIND_STORIES = [
+  'You are a senior podcast editor slicing a long spoken recording into standalone stories; each story becomes a vertical short video watched alone. A viewer who heard nothing else must fully understand the story from the clip itself.',
+  '',
+  'GOAL',
+  'Group the transcript into complete story arcs. Related mini-anecdotes about the same subject form ONE story — extend boundaries to cover the whole arc instead of emitting fragments. Never merge unrelated topics.',
+  '',
+  'START BLOCK — must give the viewer the minimum context needed to follow the story. If the earliest candidate block does not provide that context, move the start to the block that does.',
+  '',
+  'END BLOCK — end only after the story is fully resolved. If the last candidate block ends before the resolution, move the end to the block that completes it.',
+  '',
+  'SELF-CHECK before emitting each story:',
+  '1) Does it make sense played alone, with no other context?',
+  '2) Does it start with enough context and end with a resolution?',
+  'If a check fails, move boundaries to other visible blocks; if it cannot be fixed, drop the story.',
+  '',
+  'OUTPUT — JSON only, no markdown:',
+  '{"stories":[{"title":"Короткий заголовок","start_block_id":1,"end_block_id":4,"has_setup":true,"has_resolution":true,"starts_mid_thought":false,"ends_mid_thought":false,"confidence":0.9,"end_may_continue":false}]}',
+  '- title in Russian, 2-4 words; chronological order; do not skip stories',
+  '- boundaries MUST be integer block ids printed at line starts; never invent ids or timestamps'
+].join('\n');
+
+const SYSTEM_REFINE_BOUNDARIES = [
+  'You are a strict boundary checker for spoken-story clips. You get ONE candidate story and the surrounding transcript; return the corrected block range that makes the clip fully self-contained, or declare it unfixable.',
+  '',
+  'CHECKLIST (fix by moving boundaries, do not merely judge the first pass):',
+  '1. SETUP — the start must give enough context to follow the story. Move earlier to the block that provides it.',
+  '2. RESOLUTION — the end must include the resolution. Move later to the block that completes it.',
+  '3. SPILLOVER — trim the previous topic\'s tail and the next topic\'s intro.',
+  '',
+  'RULES',
+  '- Choose only block ids visibly printed below; never invent ids or timestamps.',
+  '- If no complete self-contained version exists in the visible context, set complete=false.',
+  '- Never pad a story with off-topic material.',
+  '- JSON only: {"story":{"title":"Короткий заголовок","start_block_id":1,"end_block_id":4,"has_setup":true,"has_resolution":true,"starts_mid_thought":false,"ends_mid_thought":false,"complete":true,"confidence":0.9}}'
+].join('\n');
+
 const groqChatKeyCooldowns = new Map();
 const groqChatKeyCursor = { current: 0 };
 
@@ -257,6 +295,9 @@ class GroqStoryAnalyzer {
     this.proxy = proxy || null;
     this.modelChain = [];
     this._chainHasNext = false;
+    // Selected by the caller per request kind (story search vs refinement);
+    // the analysis flow is strictly sequential so an instance field is safe.
+    this._systemPrompt = SYSTEM_FIND_STORIES;
   }
 
   /**
@@ -387,25 +428,10 @@ class GroqStoryAnalyzer {
     const lastCoreEnd = window.blocks[window.coreEnd - window.windowStart]?.end || totalDuration;
 
     return [
-      'Find complete, self-contained stories in this spoken transcript.',
-      'A story begins at the earliest block needed to understand who/what is being discussed and the setup or premise.',
-      'A story ends only after its outcome, answer, punchline, conclusion, or final consequence. Topic changes and unrelated examples belong to another story.',
-      'Return JSON only:',
-      '{"stories":[{"title":"Короткий заголовок","start_block_id":1,"end_block_id":4,"has_setup":true,"has_resolution":true,"starts_mid_thought":false,"ends_mid_thought":false,"confidence":0.9,"end_may_continue":false}]}',
-      'Rules:',
-      '- title in Russian, 2-4 words',
-      '- chronological order',
-      '- do not skip stories',
-      '- do not merge unrelated stories',
-      '- boundaries MUST be integer block ids printed at the start of transcript lines; never invent timestamps',
-      '- include setup/context at the start; never begin on a pronoun, answer, consequence, or continuation that depends on omitted speech',
-      '- include the resolution at the end; never stop on an unfinished sentence, unanswered question, setup without payoff, or transition into the conclusion',
-      '- short but complete stories are valid; do not extend them merely to reach a target duration',
-      '- if the visible transcript ends before the resolution, set end_may_continue=true and use the last relevant visible block as end_block_id',
-      '- use overlap blocks only as context',
       `- emit only stories whose START is inside core block ids ${String(coreStartId).padStart(3, '0')}..${String(coreEndId).padStart(3, '0')}`,
       `- if the story starts before block ${String(coreStartId).padStart(3, '0')} (${firstCoreStart.toFixed(2)} sec), omit it`,
       '- if no story starts in core range, return {"stories":[]}',
+      '- blocks outside the core range are overlap context only — use them to judge boundaries, never as boundaries',
       `- recording duration ${totalDuration.toFixed(2)} sec`,
       `- visible core end about ${lastCoreEnd.toFixed(2)} sec`,
       'Blocks:',
@@ -416,10 +442,17 @@ class GroqStoryAnalyzer {
   async _requestWindow(apiKey, prompt, reasoningEffort = 'default', signal, requestOptions = {}) {
     throwIfAborted(signal);
     const useJsonMode = requestOptions.useJsonMode !== false;
+    // The active system prompt is selected by the caller (story search vs
+    // boundary refinement) before entering the retry/chain machinery.
+    const systemPrompt = this._systemPrompt || SYSTEM_FIND_STORIES;
     const url = this.custom ? `${normalizeBaseUrl(this.custom.baseUrl)}/chat/completions` : GROQ_CHAT_URL;
     const payload = {
       model: this.custom ? this.custom.modelId : GROQ_QWEN_MODEL,
       messages: [
+        {
+          role: 'system',
+          content: systemPrompt
+        },
         {
           role: 'user',
           content: prompt
@@ -779,19 +812,9 @@ class GroqStoryAnalyzer {
     const firstId = Math.min(...visibleIds);
     const lastId = Math.max(...visibleIds);
     return [
-      'Refine the boundaries of one proposed spoken story.',
       `Candidate title: ${story.title}`,
       `First-pass boundary: blocks ${story.startBlockId}..${story.endBlockId}`,
-      'Move the boundaries when necessary. Do not merely judge the first-pass result.',
-      'The corrected start must include the minimum setup needed to understand the people, subject, premise, and why the story is being told.',
-      'The corrected end must include the answer, outcome, punchline, conclusion, or last relevant consequence.',
-      'Exclude the tail of the previous topic and the beginning of the next unrelated topic.',
-      'Never start on a continuation, unexplained pronoun, answer, or consequence. Never end mid-sentence, on an unanswered setup, or before the payoff.',
-      'Short complete stories are valid. Do not pad for duration.',
       `Choose only block ids visibly printed below (visible range ${firstId}..${lastId}).`,
-      'If no complete self-contained version of this candidate exists in the visible context, set complete=false.',
-      'Return JSON only:',
-      '{"story":{"title":"Короткий заголовок","start_block_id":1,"end_block_id":4,"has_setup":true,"has_resolution":true,"starts_mid_thought":false,"ends_mid_thought":false,"complete":true,"confidence":0.9}}',
       'Transcript:',
       context.transcriptText
     ].join('\n');
@@ -875,6 +898,7 @@ class GroqStoryAnalyzer {
 
     const windows = this.buildTranscriptWindows(blocks);
     onProgress?.(`Prepared transcript for Qwen: ${blocks.length} compact blocks, ${windows.length} analysis window(s).`);
+    this._systemPrompt = SYSTEM_FIND_STORIES;
 
     const rawStories = [];
     for (let i = 0; i < windows.length; i++) {
@@ -892,6 +916,7 @@ class GroqStoryAnalyzer {
       throw new Error('Qwen returned no usable stories from the transcript.');
     }
 
+    this._systemPrompt = SYSTEM_REFINE_BOUNDARIES;
     const refined = [];
     for (let i = 0; i < merged.length; i++) {
       throwIfAborted(signal);
@@ -942,4 +967,4 @@ class GroqStoryAnalyzer {
   }
 }
 
-module.exports = { GroqStoryAnalyzer, GROQ_QWEN_MODEL };
+module.exports = { GroqStoryAnalyzer, GROQ_QWEN_MODEL, SYSTEM_FIND_STORIES, SYSTEM_REFINE_BOUNDARIES };

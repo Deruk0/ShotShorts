@@ -74,7 +74,9 @@ function mergeAdjacentChunks(left, right) {
   const storyTitles = [...new Set([...chunkTitles(left), ...chunkTitles(right)])];
   return {
     ...left,
-    title: storyTitles.join(' + ').slice(0, 120) || left.title || right.title,
+    // Keep the FIRST story's title for merged clips — the other stories are
+    // tracked in storyTitles for stats, but the file name stays clean.
+    title: (left.title || right.title || '').trim(),
     storyTitles,
     storyCount: Number(left.storyCount || 1) + Number(right.storyCount || 1),
     start: left.start,

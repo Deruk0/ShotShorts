@@ -150,60 +150,72 @@
         <div class="section-title" id="txt-custom-models-title">Custom AI Models</div>
         <p class="hint" id="custom-models-hint" style="margin-top:0">A provider holds the shared Base URL and API key — add several models to one provider to reuse the same credentials. Build fallback chains so generation automatically switches to the next model when one hits limits.</p>
 
-        <p class="subsection-title">1. <span id="txt-prov-title">Providers</span></p>
-        <div class="custom-model-form">
-          <div class="field-group">
-            <label class="field-label" id="txt-cp-name" for="cp-name">Name (optional)</label>
-            <input type="text" id="cp-name" placeholder="Groq" />
+        <p class="subsection-title collapsible-title" id="title-providers" title="Collapse / expand">
+          <span class="chevron">▾</span>1. <span id="txt-prov-title">Providers</span><span class="list-count" id="count-providers"></span>
+        </p>
+        <div class="collapsible-body" id="body-providers">
+          <div class="custom-model-form">
+            <div class="field-group">
+              <label class="field-label" id="txt-cp-name" for="cp-name">Name (optional)</label>
+              <input type="text" id="cp-name" placeholder="Groq" />
+            </div>
+            <div class="field-group">
+              <label class="field-label" id="txt-cp-url" for="cp-url">Base URL</label>
+              <input type="text" id="cp-url" placeholder="https://api.groq.com/openai/v1" />
+            </div>
+            <div class="field-group">
+              <label class="field-label" id="txt-cp-key" for="cp-key">API Key</label>
+              <input type="password" id="cp-key" placeholder="gsk_…" />
+            </div>
+            <button class="btn btn-primary" id="btn-add-provider" disabled>Add Provider</button>
           </div>
-          <div class="field-group">
-            <label class="field-label" id="txt-cp-url" for="cp-url">Base URL</label>
-            <input type="text" id="cp-url" placeholder="https://api.groq.com/openai/v1" />
-          </div>
-          <div class="field-group">
-            <label class="field-label" id="txt-cp-key" for="cp-key">API Key</label>
-            <input type="password" id="cp-key" placeholder="gsk_…" />
-          </div>
-          <button class="btn btn-primary" id="btn-add-provider" disabled>Add Provider</button>
+          <div class="key-list" id="provider-list"></div>
         </div>
-        <div class="key-list" id="provider-list"></div>
 
-        <p class="subsection-title">2. <span id="txt-models-title">Models</span></p>
-        <div class="custom-model-form">
-          <div class="field-group">
-            <label class="field-label" id="txt-cm-provider" for="cm-provider">Provider</label>
-            <select id="cm-provider" class="strict-select"></select>
+        <p class="subsection-title collapsible-title" id="title-models" title="Collapse / expand">
+          <span class="chevron">▾</span>2. <span id="txt-models-title">Models</span><span class="list-count" id="count-models"></span>
+        </p>
+        <div class="collapsible-body" id="body-models">
+          <div class="custom-model-form">
+            <div class="field-group">
+              <label class="field-label" id="txt-cm-provider" for="cm-provider">Provider</label>
+              <select id="cm-provider" class="strict-select"></select>
+            </div>
+            <div class="field-group">
+              <label class="field-label" id="txt-cm-model" for="cm-model">Model ID</label>
+              <input type="text" id="cm-model" placeholder="whisper-large-v3" />
+            </div>
+            <div class="field-group">
+              <label class="field-label" id="txt-cm-name" for="cm-name">Display name (optional)</label>
+              <input type="text" id="cm-name" placeholder="Whisper Large v3" />
+            </div>
+            <button class="btn btn-primary" id="btn-add-model" disabled>Add Model</button>
           </div>
-          <div class="field-group">
-            <label class="field-label" id="txt-cm-model" for="cm-model">Model ID</label>
-            <input type="text" id="cm-model" placeholder="whisper-large-v3" />
-          </div>
-          <div class="field-group">
-            <label class="field-label" id="txt-cm-name" for="cm-name">Display name (optional)</label>
-            <input type="text" id="cm-name" placeholder="Whisper Large v3" />
-          </div>
-          <button class="btn btn-primary" id="btn-add-model" disabled>Add Model</button>
+          <div class="key-list" id="custom-model-list"></div>
         </div>
-        <div class="key-list" id="custom-model-list"></div>
 
-        <p class="subsection-title">3. <span id="txt-chains-title">Fallback chains</span></p>
-        <div class="chain-block">
-          <label class="field-label" id="txt-chain-tc" for="chain-tc-select">Transcription chain</label>
-          <div class="input-row">
-            <select id="chain-tc-select" class="strict-select"></select>
-            <button class="btn btn-secondary" id="btn-chain-tc-add" disabled>Add</button>
+        <p class="subsection-title collapsible-title" id="title-chains" title="Collapse / expand">
+          <span class="chevron">▾</span>3. <span id="txt-chains-title">Fallback chains</span>
+        </p>
+        <div class="collapsible-body" id="body-chains">
+          <div class="chain-block">
+            <label class="field-label" id="txt-chain-tc" for="chain-tc-select">Transcription chain</label>
+            <div class="input-row">
+              <select id="chain-tc-select" class="strict-select"></select>
+              <button class="btn btn-secondary" id="btn-chain-tc-add" disabled>Add</button>
+            </div>
+            <div class="key-list chain-list" id="chain-tc-list"></div>
           </div>
-          <div class="key-list" id="chain-tc-list"></div>
-        </div>
-        <div class="chain-block" style="margin-top:16px;">
-          <label class="field-label" id="txt-chain-ac" for="chain-ac-select">Analysis chain</label>
-          <div class="input-row">
-            <select id="chain-ac-select" class="strict-select"></select>
-            <button class="btn btn-secondary" id="btn-chain-ac-add" disabled>Add</button>
+          <div class="chain-block" style="margin-top:16px;">
+            <label class="field-label" id="txt-chain-ac" for="chain-ac-select">Analysis chain</label>
+            <div class="input-row">
+              <select id="chain-ac-select" class="strict-select"></select>
+              <button class="btn btn-secondary" id="btn-chain-ac-add" disabled>Add</button>
+            </div>
+            <div class="key-list chain-list" id="chain-ac-list"></div>
           </div>
-          <div class="key-list" id="chain-ac-list"></div>
+          <p class="hint" id="chains-hint" style="margin-top:10px;">Models are tried in order: when one hits rate limits or fails, the next one takes over automatically.</p>
         </div>
-        <p class="hint" id="chains-hint" style="margin-top:10px;">Models are tried in order: when one hits rate limits or fails, the next one takes over automatically.</p>
       </div>
 
       <div class="divider"></div>

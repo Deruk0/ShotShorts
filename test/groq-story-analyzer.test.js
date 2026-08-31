@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { GroqStoryAnalyzer } = require('../app/services/groq-story-analyzer');
+const { GroqStoryAnalyzer, SYSTEM_FIND_STORIES, SYSTEM_REFINE_BOUNDARIES } = require('../app/services/groq-story-analyzer');
 
 class FakeStoryAnalyzer extends GroqStoryAnalyzer {
   constructor(responses) {
@@ -79,8 +79,13 @@ test('story analysis grounds boundaries in block ids and refines the ending', as
   assert.equal(result.stories[0].endBlockId, 3);
   assert.equal(result.stories[0].start, 0);
   assert.equal(result.stories[0].end, 15);
-  assert.match(analyzer.prompts[0], /start_block_id/);
-  assert.match(analyzer.prompts[1], /Move the boundaries when necessary/);
+  // The user prompt carries only dynamic data; the JSON schema lives in the
+  // system message, which switches to the refinement contract afterwards.
+  assert.match(analyzer.prompts[0], /core block ids 001\.\.004/);
+  assert.match(analyzer.prompts[0], /Blocks:/);
+  assert.equal(analyzer.prompts[0].includes('start_block_id'), false);
+  assert.match(analyzer.prompts[1], /First-pass boundary/);
+  assert.equal(analyzer._systemPrompt, SYSTEM_REFINE_BOUNDARIES);
 });
 
 test('first pass rejects a boundary block that was not visible to the model', () => {
@@ -151,4 +156,16 @@ test('JSON validation errors fall back to non-reasoning and local parsing modes'
     [['default', true], ['none', true], ['none', false]]
   );
   assert.ok(analyzer.calls.every((call) => call.requestOptions.maxCompletionTokens === 4096));
+});
+
+test('system prompts carry the contract and stay free of duration hints', () => {
+  assert.match(SYSTEM_FIND_STORIES, /vertical short video/);
+  assert.match(SYSTEM_FIND_STORIES, /GOAL/);
+  assert.match(SYSTEM_FIND_STORIES, /SELF-CHECK/);
+  assert.match(SYSTEM_FIND_STORIES, /start_block_id/);
+  assert.match(SYSTEM_REFINE_BOUNDARIES, /CHECKLIST/);
+  assert.match(SYSTEM_REFINE_BOUNDARIES, /complete=false/);
+  // Duration is owned by the chunker, not the model.
+  assert.equal(SYSTEM_FIND_STORIES.includes('2:30'), false);
+  assert.equal(SYSTEM_FIND_STORIES.includes('target'), false);
 });

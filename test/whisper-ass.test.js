@@ -60,3 +60,27 @@ test('toASS shifts events over interstitial pause windows', () => {
   ], 'Classic', 0, { wordsPerLine: 3, interstitial: { intervalSec: 60, durationSec: 5 } }, 'sentence');
   assert.ok(unshifted.includes('0:00:01.00'));
 });
+
+test('toASS cuts subtitles when the interstitial banner appears', () => {
+  const ws = new WhisperService();
+  // Word 59..62 straddles the window at output 60..65: the event must end
+  // exactly at 60 (banner appearance), not render on top of the banner.
+  const ass = ws.toASS([
+    { start: 59, end: 62, text: 'hello world', words: [{ word: 'hello', start: 59, end: 62 }] }
+  ], 'Classic', 0, { wordsPerLine: 3, interstitial: { intervalSec: 60, durationSec: 5 } }, 'sentence');
+  const dialogue = ass.split('\n').find((l) => l.startsWith('Dialogue:'));
+  assert.ok(dialogue.includes('0:00:59.00'), 'start stays at 59s');
+  assert.ok(dialogue.includes('0:01:00.00'), 'end cut at 60s (window start)');
+
+  // Word after the window resumes past it (shifted by 5s).
+  const after = ws.toASS([
+    { start: 63, end: 64, text: 'hello world', words: [{ word: 'hello', start: 63, end: 64 }] }
+  ], 'Classic', 0, { wordsPerLine: 3, interstitial: { intervalSec: 60, durationSec: 5 } }, 'sentence');
+  assert.ok(after.includes('0:01:08.00'), 'post-window event starts at 68s');
+
+  // Without interstitial nothing is clipped (maxLineMs caps at 59+1.2s).
+  const plain = ws.toASS([
+    { start: 59, end: 62, text: 'hello world', words: [{ word: 'hello', start: 59, end: 62 }] }
+  ], 'Classic', 0, { wordsPerLine: 3 }, 'sentence');
+  assert.ok(plain.includes('0:01:00.20'));
+});

@@ -911,6 +911,20 @@ class WhisperService {
       if (!(interInterval > 0) || !(interDuration > 0)) return tt;
       return tt + interDuration * Math.floor(tt / interInterval);
     };
+    // Window k occupies [k*(I+D)-D, k*(I+D)) on the output timeline. A
+    // subtitle event that straddles a window start is cut exactly when the
+    // banner appears — text disappears together with the paused video.
+    const clipAtWindowStart = (s, e) => {
+      if (!(interInterval > 0) || !(interDuration > 0)) return e;
+      let k = Math.max(1, Math.ceil((s + interDuration) / (interInterval + interDuration)));
+      while (k < 100000) {
+        const winStart = k * (interInterval + interDuration) - interDuration;
+        if (winStart >= e) return e;
+        if (winStart > s) return winStart;
+        k += 1;
+      }
+      return e;
+    };
 
     const header = [
       '[Script Info]',
@@ -952,7 +966,7 @@ class WhisperService {
           const cStartRaw = Math.max(0, cStartAbs - offsetSec);
           const cEndRaw = Math.max(cStartRaw + 0.12, cEndAbsCapped - offsetSec);
           const cStart = shiftForInterstitial(cStartRaw);
-          const cEnd = shiftForInterstitial(cEndRaw);
+          const cEnd = clipAtWindowStart(cStart, shiftForInterstitial(cEndRaw));
           const chunkWords = chunk.map(w => String(w.word || '').trim()).filter(Boolean);
           let text = chunkWords.join(' ').trim();
           if (karaoke) {
@@ -961,7 +975,7 @@ class WhisperService {
               const wStart = Number(w.start || cStartRaw);
               const nextStart = wi < chunk.length - 1 ? Number(chunk[wi + 1].start || w.end || wStart) : Number(w.end || cEndRaw);
               const ws = shiftForInterstitial(Math.max(0, wStart - offsetSec));
-              const we = Math.max(ws + 0.06, shiftForInterstitial(Math.min(cEndRaw, nextStart - offsetSec)));
+              const we = clipAtWindowStart(ws, Math.max(ws + 0.06, shiftForInterstitial(Math.min(cEndRaw, nextStart - offsetSec))));
               const line = buildAssKaraokeLine(
                 chunkWords,
                 wi,
@@ -996,8 +1010,10 @@ class WhisperService {
           if (!chunkText) { idx += wordsPerLine; continue; }
           const wordStart = segStart + (idx / totalWords) * segDuration;
           const wordEnd = Math.min(segStart + ((idx + wordsPerLine) / totalWords) * segDuration, segEnd);
-          const cStart = shiftForInterstitial(wordStart);
-          const cEnd = shiftForInterstitial(Math.min(Math.max(cStart + 0.2, wordStart + maxLineMs / 1000), wordEnd));
+          const fStart = shiftForInterstitial(wordStart);
+          const fEnd = clipAtWindowStart(fStart, shiftForInterstitial(Math.min(Math.max(wordStart + 0.2, wordStart + maxLineMs / 1000), wordEnd)));
+          const cStart = fStart;
+          const cEnd = fEnd;
           events.push(`Dialogue: 0,${seconds2ass(cStart)},${seconds2ass(cEnd)},Default,,0,0,0,,${customPosTag}${chunkText}`);
           idx += wordsPerLine;
         }

@@ -963,6 +963,14 @@ function updateNoKeysWarning() {
   $('#no-keys-warning').style.display = missing ? '' : 'none';
 }
 
+function updateListCounts() {
+  const counts = { providers: getProviders().length, models: getModels().length };
+  Object.entries(counts).forEach(([key, value]) => {
+    const el = $(`#count-${key}`);
+    if (el) el.textContent = value > 0 ? `· ${value}` : '';
+  });
+}
+
 function renderProviders() {
   const list = $('#provider-list');
   const select = $('#cm-provider');
@@ -1011,6 +1019,7 @@ function renderProviders() {
     const wanted = prev && providers.some((p) => p.id === prev) ? prev : (providers[0]?.id || '');
     select.value = wanted;
   }
+  updateListCounts();
   window.SharpSelect?.refresh();
 }
 
@@ -1046,6 +1055,7 @@ function renderCustomModels() {
   renderChainSelect('ac');
   renderChain('tc');
   renderChain('ac');
+  updateListCounts();
   updateModelCount();
   updateNoKeysWarning();
 }
@@ -1065,7 +1075,7 @@ function renderChainSelect(role) {
   models.forEach((model) => {
     const option = document.createElement('option');
     option.value = `custom:${model.id}`;
-    option.textContent = `${model.name} (${model.modelId})`;
+    option.textContent = model.name;
     select.appendChild(option);
   });
   const wanted = prev && models.some((m) => `custom:${m.id}` === prev) ? prev : '';
@@ -1096,13 +1106,27 @@ function renderChain(role) {
     const modelId = key.slice('custom:'.length);
     const model = models.find((m) => m.id === modelId);
     const tag = document.createElement('span');
-    tag.className = 'key-tag';
+    tag.className = 'key-tag chain-tag';
     if (!model) tag.style.opacity = '0.5';
     const order = document.createElement('span');
     order.className = 'chain-order';
     order.textContent = `${index + 1}.`;
     tag.appendChild(order);
-    tag.appendChild(document.createTextNode(model ? `${model.name} · ${model.modelId} ` : `${key} `));
+
+    // Two columns: provider name first, then the model display name — no
+    // technical model ids. Both columns truncate with ellipsis when narrow.
+    const provider = model ? getProviders().find((p) => p.id === model.providerId) : null;
+    const providerCol = document.createElement('span');
+    providerCol.className = 'chain-col provider-col';
+    providerCol.textContent = provider ? provider.name : (model ? '—' : key);
+    providerCol.title = provider ? provider.name : '';
+    tag.appendChild(providerCol);
+
+    const modelCol = document.createElement('span');
+    modelCol.className = 'chain-col';
+    modelCol.textContent = model ? model.name : key;
+    modelCol.title = model ? model.name : key;
+    tag.appendChild(modelCol);
 
     const upBtn = document.createElement('button');
     upBtn.className = 'move';
@@ -1251,6 +1275,47 @@ function moveChainItem(role, index, delta) {
   saveSettings();
   renderChain(role);
 }
+
+// Collapsible subsections (providers / models / chains): the state is
+// remembered between sessions via localStorage.
+const COLLAPSE_STORAGE_KEY = 'shotshorts-collapsed-lists';
+
+function loadCollapsedSections() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(COLLAPSE_STORAGE_KEY) || '{}');
+    return raw && typeof raw === 'object' ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCollapsedSections(state) {
+  try { localStorage.setItem(COLLAPSE_STORAGE_KEY, JSON.stringify(state)); } catch {}
+}
+
+function applyCollapsible(title, body, collapsed) {
+  body.style.display = collapsed ? 'none' : '';
+  title.classList.toggle('collapsed', collapsed);
+  const chevron = title.querySelector('.chevron');
+  if (chevron) chevron.textContent = collapsed ? '▸' : '▾';
+}
+
+function bindCollapsibleSection(titleId, bodyId, storageKey) {
+  const title = $(`#${titleId}`);
+  const body = $(`#${bodyId}`);
+  if (!title || !body) return;
+  applyCollapsible(title, body, !!loadCollapsedSections()[storageKey]);
+  title.addEventListener('click', () => {
+    const state = loadCollapsedSections();
+    state[storageKey] = !state[storageKey];
+    saveCollapsedSections(state);
+    applyCollapsible(title, body, !!state[storageKey]);
+  });
+}
+
+bindCollapsibleSection('title-providers', 'body-providers', 'providers');
+bindCollapsibleSection('title-models', 'body-models', 'models');
+bindCollapsibleSection('title-chains', 'body-chains', 'chains');
 
 $('#btn-add-provider').addEventListener('click', addProvider);
 ['cp-url', 'cp-key'].forEach((id) => {
