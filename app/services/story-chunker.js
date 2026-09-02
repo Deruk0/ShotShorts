@@ -3,6 +3,37 @@ const MIN_CHUNK_DURATION_SEC = 90;
 const MAX_CHUNK_DURATION_SEC = 300;
 const MAX_COMBINED_DURATION_SEC = MAX_CHUNK_DURATION_SEC + MIN_CHUNK_DURATION_SEC;
 
+// Cinema mode: movie scenes are standalone viral clips. Short scenes stay as
+// they are (no merging — merging would glue unrelated scenes together), while
+// long scenes are split at natural boundaries into TikTok-sized parts.
+const CINEMA_CHUNK_PROFILE = Object.freeze({
+  targetChunkDurationSec: 45,
+  minChunkDurationSec: 20,
+  maxChunkDurationSec: 90,
+  maxCombinedDurationSec: 90,
+  mergeShortChunks: false
+});
+
+function clampNumber(value, min, max, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.min(max, numeric));
+}
+
+function buildChunkProfile(options = {}) {
+  const target = clampNumber(options.targetChunkDurationSec, 10, 3600, TARGET_CHUNK_DURATION_SEC);
+  const min = clampNumber(options.minChunkDurationSec, 5, target, MIN_CHUNK_DURATION_SEC);
+  const max = clampNumber(options.maxChunkDurationSec, min, 7200, MAX_CHUNK_DURATION_SEC);
+  const maxCombined = clampNumber(options.maxCombinedDurationSec, max, 14400, max + min);
+  return {
+    targetChunkDurationSec: target,
+    minChunkDurationSec: min,
+    maxChunkDurationSec: max,
+    maxCombinedDurationSec: maxCombined,
+    mergeShortChunks: options.mergeShortChunks !== false
+  };
+}
+
 function normalizeTranscriptSegments(transcriptSegments) {
   return (Array.isArray(transcriptSegments) ? transcriptSegments : [])
     .map((segment) => ({
@@ -22,11 +53,11 @@ function boundaryScore(segment, nextSegment, desiredEnd) {
   return distancePenalty - sentenceBonus - pauseBonus;
 }
 
-function findNaturalCut(segments, partStart, desiredEnd, latestEnd, storyEnd) {
+function findNaturalCut(segments, partStart, desiredEnd, latestEnd, storyEnd, profile) {
   let best = null;
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
-    if (segment.end < partStart + MIN_CHUNK_DURATION_SEC) continue;
+    if (segment.end < partStart + profile.minChunkDurationSec) continue;
     if (segment.end > latestEnd || segment.end >= storyEnd - 20) continue;
     const score = boundaryScore(segment, segments[i + 1], desiredEnd);
     if (!best || score < best.score) best = { end: segment.end, score };
@@ -34,21 +65,21 @@ function findNaturalCut(segments, partStart, desiredEnd, latestEnd, storyEnd) {
   return best?.end || null;
 }
 
-function splitLongStoryAtNaturalBoundaries(story, transcriptSegments) {
+function splitLongStoryAtNaturalBoundaries(story, transcriptSegments, profile) {
   const duration = story.end - story.start;
-  if (duration <= MAX_CHUNK_DURATION_SEC) return [{ ...story, partIndex: null }];
+  if (duration <= profile.maxChunkDurationSec) return [{ ...story, partIndex: null }];
 
   const segments = normalizeTranscriptSegments(transcriptSegments)
     .filter((segment) => segment.end > story.start && segment.start < story.end);
-  const expectedParts = Math.max(2, Math.round(duration / TARGET_CHUNK_DURATION_SEC));
+  const expectedParts = Math.max(2, Math.round(duration / profile.targetChunkDurationSec));
   const desiredPartDuration = duration / expectedParts;
   const chunks = [];
   let partStart = story.start;
 
-  while (story.end - partStart > MAX_CHUNK_DURATION_SEC) {
+  while (story.end - partStart > profile.maxChunkDurationSec) {
     const desiredEnd = Math.min(story.end, partStart + desiredPartDuration);
-    const latestEnd = Math.min(story.end, partStart + MAX_CHUNK_DURATION_SEC);
-    const cut = findNaturalCut(segments, partStart, desiredEnd, latestEnd, story.end);
+    const latestEnd = Math.min(story.end, partStart + profile.maxChunkDurationSec);
+    const cut = findNaturalCut(segments, partStart, desiredEnd, latestEnd, story.end, profile);
     if (!cut || cut <= partStart) {
       // A long complete story is preferable to a cut in the middle of speech.
       return [{ ...story, partIndex: null }];
@@ -85,7 +116,8 @@ function mergeAdjacentChunks(left, right) {
   };
 }
 
-function mergeShortChunks(chunks) {
+function mergeShortChunks(chunks, profile) {
+  const activeProfile = profile || buildChunkProfile();
   const merged = chunks.map((chunk) => ({
     ...chunk,
     storyTitles: chunkTitles(chunk),
@@ -97,16 +129,16 @@ function mergeShortChunks(chunks) {
   while (merged.length > 1) {
     let changed = false;
     for (let i = 0; i < merged.length; i++) {
-      if (chunkDuration(merged[i]) >= MIN_CHUNK_DURATION_SEC) continue;
+      if (chunkDuration(merged[i]) >= activeProfile.minChunkDurationSec) continue;
 
       const candidates = [];
       if (i > 0) {
         const duration = merged[i].end - merged[i - 1].start;
-        if (duration <= MAX_COMBINED_DURATION_SEC) candidates.push({ side: 'left', duration });
+        if (duration <= activeProfile.maxCombinedDurationSec) candidates.push({ side: 'left', duration });
       }
       if (i + 1 < merged.length) {
         const duration = merged[i + 1].end - merged[i].start;
-        if (duration <= MAX_COMBINED_DURATION_SEC) candidates.push({ side: 'right', duration });
+        if (duration <= activeProfile.maxCombinedDurationSec) candidates.push({ side: 'right', duration });
       }
       if (!candidates.length) continue;
 
@@ -125,13 +157,20 @@ function mergeShortChunks(chunks) {
   return merged;
 }
 
-function buildStoryChunks(stories, transcriptSegments) {
+function buildStoryChunks(stories, transcriptSegments, options = {}) {
+  const profile = buildChunkProfile(options);
   const chunks = [];
   for (const story of Array.isArray(stories) ? stories : []) {
     if (!Number.isFinite(story?.start) || !Number.isFinite(story?.end) || story.end <= story.start) continue;
-    chunks.push(...splitLongStoryAtNaturalBoundaries(story, transcriptSegments));
+    chunks.push(...splitLongStoryAtNaturalBoundaries(story, transcriptSegments, profile));
   }
-  return mergeShortChunks(chunks).map((chunk, index) => ({ ...chunk, index: index + 1 }));
+  const normalized = chunks.map((chunk) => ({
+    ...chunk,
+    storyTitles: chunkTitles(chunk),
+    storyCount: Number(chunk.storyCount || 1)
+  }));
+  const finalChunks = profile.mergeShortChunks ? mergeShortChunks(normalized, profile) : normalized;
+  return finalChunks.map((chunk, index) => ({ ...chunk, index: index + 1 }));
 }
 
 module.exports = {
@@ -139,6 +178,8 @@ module.exports = {
   MIN_CHUNK_DURATION_SEC,
   MAX_CHUNK_DURATION_SEC,
   MAX_COMBINED_DURATION_SEC,
+  CINEMA_CHUNK_PROFILE,
+  buildChunkProfile,
   buildStoryChunks,
   mergeShortChunks,
   splitLongStoryAtNaturalBoundaries

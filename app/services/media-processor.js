@@ -598,6 +598,130 @@ class MediaProcessor {
     return outFile;
   }
 
+  /**
+   * Cinema mode render: the movie's own frames become the 1080x1920 clip.
+   * No background videos are used. fillMode: 'crop' (center crop) or 'blur'
+   * (movie centered over a blurred zoomed backdrop).
+   */
+  async assembleCinemaClip(segment, sourceVideoPath, outputDir, options, onProgress, subtitlePath = null, subtitleOptions = {}, bannerOptions = null) {
+    this._throwIfCancelled();
+
+    const fillMode = options?.fillMode === 'blur' ? 'blur' : 'crop';
+    const duration = segment.end - segment.start;
+    const safeTitle = this._sanitizeFileName(segment.title || `Scene ${segment.index}`);
+    const outFileName = segment.partIndex
+      ? this._sanitizeFileName(`Part ${segment.partIndex} - ${safeTitle}.mp4`)
+      : this._sanitizeFileName(`${safeTitle}.mp4`);
+    const outFile = path.join(outputDir, outFileName);
+    const pId = segment.partIndex ? `${segment.index}_p${segment.partIndex}` : segment.index;
+    const segAudio = path.join(os.tmpdir(), `ss_cinema_audio_${pId}_${Date.now()}.wav`);
+
+    const msgTitle = segment.partIndex ? `"${segment.title}" (Part ${segment.partIndex})` : `"${segment.title}"`;
+    onProgress?.({ step: `Rendering Scene ${segment.index}`, percent: 0, message: `${msgTitle} (${Math.round(duration)}s)` });
+
+    // Cut segment audio from the source movie.
+    await this._runCommand(
+      ffmpeg(sourceVideoPath).setStartTime(segment.start).setDuration(duration)
+        .audioCodec('pcm_s16le').audioChannels(2).audioFrequency(44100).format('wav')
+        .output(segAudio)
+    );
+    this._throwIfCancelled();
+
+    const progressHandler = i => {
+      let p = i.percent || 0;
+      if (i.timemark) {
+        const parts = i.timemark.split(':');
+        if (parts.length === 3) {
+          const currentSeconds = parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2]);
+          if (duration > 0) p = (currentSeconds / duration) * 100;
+        }
+      }
+      onProgress?.({
+        step: `Rendering Scene ${segment.index}`,
+        percent: Math.min(p, 100),
+        message: `${msgTitle} — ${Math.min(Math.round(p), 100)}%`
+      });
+    };
+
+    const isSubtitleVideo = subtitlePath && /\.(webm|mov)$/i.test(subtitlePath);
+
+    try {
+      await new Promise((res, rej) => {
+        // Input seeking (-ss before -i) is accurate when re-encoding and much
+        // faster than decoding from the beginning.
+        const cmd = ffmpeg(sourceVideoPath)
+          .inputOptions(['-ss', String(Math.max(0, segment.start))]);
+        cmd.input(segAudio);
+        if (isSubtitleVideo) cmd.input(subtitlePath);
+
+        const filterStrings = [];
+        if (fillMode === 'blur') {
+          filterStrings.push(
+            '[0:v]setpts=PTS-STARTPTS,split=2[mvbg][mvfg];' +
+            '[mvbg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,gblur=sigma=30,eq=brightness=-0.06[mvbgb];' +
+            '[mvfg]scale=1080:1920:force_original_aspect_ratio=decrease[mvfgs];' +
+            '[mvbgb][mvfgs]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=30,format=yuv420p[mvscaled]'
+          );
+        } else {
+          filterStrings.push(
+            '[0:v]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,format=yuv420p[mvscaled]'
+          );
+        }
+
+        // Burn-in subtitles if provided
+        if (subtitlePath) {
+          if (isSubtitleVideo) {
+            filterStrings.push('[mvscaled][2:v]overlay=0:0:eof_action=pass:format=yuv420[mvsub]');
+          } else {
+            const escaped = this._escapeSubtitlePathForFilter(subtitlePath);
+            const ext = path.extname(subtitlePath).toLowerCase();
+            if (ext === '.ass') {
+              filterStrings.push(`[mvscaled]${this._buildAssFilterArgs(subtitlePath, subtitleOptions)}[mvsub]`);
+            } else {
+              const forceStyle = this._buildSrtForceStyle(subtitleOptions);
+              filterStrings.push(`[mvscaled]subtitles='${escaped}':charenc=UTF-8:force_style='${forceStyle}'[mvsub]`);
+            }
+          }
+        } else {
+          filterStrings.push('[mvscaled]null[mvsub]');
+        }
+
+        if (bannerOptions && bannerOptions.path) {
+          const bannerInputIndex = 2 + (isSubtitleVideo ? 1 : 0);
+          cmd.input(bannerOptions.path);
+          if (!bannerOptions.isImage) cmd.inputOptions(['-stream_loop', '-1']);
+          filterStrings.push(...buildBannerFilterStrings(
+            bannerInputIndex,
+            bannerOptions.layout,
+            'mvsub',
+            'mvout',
+            bannerOptions.opacity
+          ));
+        } else {
+          filterStrings.push('[mvsub]null[mvout]');
+        }
+
+        cmd.complexFilter(filterStrings)
+          .outputOptions([
+            '-t', String(duration),
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+            '-c:a', 'aac', '-b:a', '192k',
+            '-map', '[mvout]', '-map', '1:a:0',
+            '-shortest',
+            '-movflags', '+faststart'
+          ])
+          .output(outFile)
+          .on('progress', progressHandler);
+
+        this._runCommand(cmd).then(res).catch(rej);
+      });
+    } finally {
+      try { fs.unlinkSync(segAudio); } catch {}
+    }
+
+    return outFile;
+  }
+
   _sanitizeFileName(name) {
     const base = String(name || 'output')
       .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')

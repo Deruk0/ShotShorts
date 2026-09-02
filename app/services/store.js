@@ -83,6 +83,9 @@ async function getStore() {
       bannerMode: { type: 'string', default: 'overlay' },
       bannerIntervalSec: { type: 'number', default: 60 },
       bannerDurationSec: { type: 'number', default: 5 },
+      generationMode: { type: 'string', default: 'stories' },
+      cinemaSceneCount: { type: 'number', default: 10 },
+      cinemaFillMode: { type: 'string', default: 'crop' },
       appLanguage: { type: 'string', default: 'en' },
       appTheme: { type: 'string', default: 'dark' },
       activePresetId: {
@@ -172,6 +175,9 @@ async function getSettings() {
     bannerMode: store.get('bannerMode'),
     bannerIntervalSec: store.get('bannerIntervalSec'),
     bannerDurationSec: store.get('bannerDurationSec'),
+    generationMode: store.get('generationMode'),
+    cinemaSceneCount: store.get('cinemaSceneCount'),
+    cinemaFillMode: store.get('cinemaFillMode'),
     appLanguage: store.get('appLanguage'),
     appTheme: store.get('appTheme'),
     activePresetId: store.get('activePresetId'),
@@ -233,6 +239,16 @@ async function saveSettings(settings) {
   if (settings.bannerMode !== undefined) store.set('bannerMode', ['overlay', 'interstitial'].includes(settings.bannerMode) ? settings.bannerMode : 'overlay');
   if (settings.bannerIntervalSec !== undefined) store.set('bannerIntervalSec', Math.max(1, Math.min(3600, Number(settings.bannerIntervalSec) || 60)));
   if (settings.bannerDurationSec !== undefined) store.set('bannerDurationSec', Math.max(1, Math.min(30, Number(settings.bannerDurationSec) || 5)));
+  if (settings.generationMode !== undefined) {
+    store.set('generationMode', settings.generationMode === 'cinema' ? 'cinema' : 'stories');
+  }
+  if (settings.cinemaSceneCount !== undefined) {
+    const sceneCount = Math.round(Number(settings.cinemaSceneCount));
+    store.set('cinemaSceneCount', Math.max(5, Math.min(20, Number.isFinite(sceneCount) ? sceneCount : 10)));
+  }
+  if (settings.cinemaFillMode !== undefined) {
+    store.set('cinemaFillMode', settings.cinemaFillMode === 'blur' ? 'blur' : 'crop');
+  }
   if (settings.appLanguage !== undefined) store.set('appLanguage', settings.appLanguage);
   if (settings.appTheme !== undefined) store.set('appTheme', settings.appTheme);
   if (settings.activePresetId !== undefined) store.set('activePresetId', settings.activePresetId || null);

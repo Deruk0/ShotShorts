@@ -10,7 +10,15 @@ const { FontManager } = require('./font-manager');
 const { getProxy } = require('./store');
 const { isAbortError, runFfmpegCommand, throwIfAborted } = require('./cancellation');
 const { alignStoriesToTranscript } = require('./story-padding');
-const { buildStoryChunks } = require('./story-chunker');
+const { buildStoryChunks, CINEMA_CHUNK_PROFILE } = require('./story-chunker');
+const {
+  buildActionScenes,
+  analyzeMovieEnergy,
+  normalizeCinemaSceneCount,
+  normalizeActionScenes,
+  buildCinemaSceneList,
+  writeSceneMetaFile
+} = require('./cinema-scene-detector');
 const { computeBannerLayout, isImageBanner, hasAlphaPixFmt } = require('./banner-utils');
 const { resolveModelChain } = require('./model-registry');
 
@@ -77,16 +85,207 @@ function prepareAudioForWhisper(inputAudioPath, onProgress, signal) {
   return runFfmpegCommand(cmd, { signal }).then(() => outPath);
 }
 
+/**
+ * Cinema mode pipeline: movie in → 5-20 viral scene clips out.
+ * Reuses extractAudio/Whisper/subtitle/banner/render infrastructure, but
+ * scene selection combines LLM (dialogue impact) with an ffmpeg energy
+ * detector (loud, cut-heavy, speechless action), and the render uses the
+ * movie's own frames instead of background videos.
+ */
+async function runCinemaPipeline(ctx) {
+  const {
+    config, send, signal, tempFiles, mp, whisper, whisperAudioPath,
+    transcriptSegments, sourceAudioDuration, proxy, analysisModels,
+    subtitlesEnabled, subtitleOffsetSec, subtitleOptions
+  } = ctx;
+
+  const sceneCount = normalizeCinemaSceneCount(config.cinemaSceneCount);
+  const fillMode = config.cinemaFillMode === 'blur' ? 'blur' : 'crop';
+
+  send({ step: 'Cinema Mode', percent: 30, message: `Selecting the top ${sceneCount} scenes…` });
+
+  // LLM scene search over dialogue. A movie with no usable speech still
+  // produces action-only output instead of failing.
+  let llmScenes = [];
+  if (transcriptSegments.length) {
+    try {
+      const analyzer = new GroqStoryAnalyzer([], proxy, null);
+      analyzer.setModelChain(analysisModels);
+      const analysis = await analyzer.analyzeScenes(
+        transcriptSegments,
+        sourceAudioDuration,
+        sceneCount,
+        (msg) => send({ step: 'Analyzing Scenes', percent: 34, message: msg }),
+        { signal }
+      );
+      throwIfAborted(signal);
+      llmScenes = alignStoriesToTranscript(analysis.scenes, transcriptSegments, sourceAudioDuration)
+        .map((scene) => ({ ...scene, hook: scene.hook || '' }));
+    } catch (err) {
+      if (isAbortError(err) || signal.aborted) throw err;
+      send({ step: 'Analyzing Scenes', percent: 36, message: `Dialogue scene search failed (${err.message}). Falling back to action detection only.` });
+    }
+  }
+
+  // Action candidates: loud + cut-heavy + speechless windows.
+  let actionScenes = [];
+  const remaining = Math.max(0, sceneCount - llmScenes.length);
+  if (remaining > 0) {
+    try {
+      const energy = await analyzeMovieEnergy(
+        config.sourceVideo,
+        (msg) => send({ step: 'Detecting Action', percent: 40, message: msg }),
+        signal
+      );
+      actionScenes = buildActionScenes(energy, transcriptSegments, sourceAudioDuration, remaining);
+    } catch (err) {
+      if (isAbortError(err) || signal.aborted) throw err;
+      send({ step: 'Detecting Action', percent: 44, message: `Action detection failed (${err.message}). Continuing without action scenes.` });
+    }
+  }
+
+  const scenes = buildCinemaSceneList(
+    llmScenes,
+    normalizeActionScenes(actionScenes, sourceAudioDuration, llmScenes.length),
+    sourceAudioDuration
+  );
+  if (!scenes.length) {
+    return { success: false, error: 'No scenes could be selected from this movie.' };
+  }
+
+  send({
+    step: 'Scenes Selected',
+    percent: 46,
+    message: `${llmScenes.length} dialogue + ${scenes.length - llmScenes.length} action scene(s) selected`
+  });
+
+  const chunks = buildStoryChunks(scenes, transcriptSegments, CINEMA_CHUNK_PROFILE);
+  if (!chunks.length) {
+    return { success: false, error: 'No valid scene chunks were produced.' };
+  }
+
+  // Fonts for subtitle burn-in.
+  if (subtitlesEnabled) {
+    try {
+      throwIfAborted(signal);
+      const fm = new FontManager();
+      await fm.ensureTtfFonts((msg) => send({ step: 'Preparing Fonts', percent: 48, message: msg }), signal);
+      throwIfAborted(signal);
+      if (fm.hasAnyTtf()) {
+        subtitleOptions.fontsDir = fm.getTtfDir();
+      } else {
+        subtitleOptions.fontFamily = 'Arial';
+      }
+    } catch (fontErr) {
+      if (isAbortError(fontErr) || signal.aborted) throw fontErr;
+      subtitleOptions.fontFamily = 'Arial';
+    }
+  }
+
+  // Banner (same overlay logic as story mode).
+  let bannerOptions = null;
+  if (config.bannerEnabled && config.bannerPath) {
+    try {
+      throwIfAborted(signal);
+      if (!fs.existsSync(config.bannerPath)) throw new Error('banner file not found');
+      const dims = await mp.getMediaDimensions(config.bannerPath);
+      const layout = computeBannerLayout(
+        { x: config.bannerX, y: config.bannerY, width: config.bannerWidth, height: config.bannerHeight },
+        dims.width,
+        dims.height
+      );
+      // Interstitial pauses are not supported in cinema mode yet: render
+      // the banner as a plain overlay instead.
+      bannerOptions = {
+        path: config.bannerPath,
+        isImage: isImageBanner(config.bannerPath),
+        layout,
+        opacity: Math.max(0, Math.min(100, Number(config.bannerOpacity === undefined ? 100 : config.bannerOpacity))) / 100,
+        bannerHasAudio: !!dims.hasAudio,
+        interstitial: null
+      };
+    } catch (bannerErr) {
+      if (isAbortError(bannerErr) || signal.aborted) throw bannerErr;
+      send({ step: 'Banner Skipped', percent: 50, message: `Banner disabled: ${bannerErr.message}.` });
+      bannerOptions = null;
+    }
+  }
+
+  const outputFiles = [];
+  const subtitleFailures = [];
+  const basePercent = 50;
+  const perChunkPercent = 45 / Math.max(chunks.length, 1);
+
+  for (let i = 0; i < chunks.length; i++) {
+    throwIfAborted(signal);
+    const chunk = chunks[i];
+    const percentBase = basePercent + i * perChunkPercent;
+    const sp = (data) => send({
+      step: data.step,
+      percent: Math.min(percentBase + (data.percent / 100) * perChunkPercent, 96),
+      message: data.message
+    });
+
+    let subtitlePath = null;
+    if (subtitlesEnabled) {
+      try {
+        const localSegments = whisper.sliceSegments(transcriptSegments, chunk.start, chunk.end);
+        if (localSegments.length > 0) {
+          sp({ step: `Preparing Scene ${chunk.index}`, percent: 15, message: 'Preparing subtitles…' });
+          const assContent = whisper.toASS(
+            localSegments,
+            subtitleOptions.stylePreset,
+            subtitleOffsetSec,
+            subtitleOptions,
+            subtitleOptions.caseName
+          );
+          const assFile = path.join(os.tmpdir(), `ss_cinema_sub_${i}_${Date.now()}.ass`);
+          fs.writeFileSync(assFile, assContent, 'utf8');
+          tempFiles.push(assFile);
+          subtitlePath = assFile;
+        }
+      } catch (subtitleErr) {
+        if (isAbortError(subtitleErr) || signal.aborted) throw subtitleErr;
+        subtitleFailures.push(chunk.index);
+        subtitlePath = null;
+      }
+    }
+
+    const out = await mp.assembleCinemaClip(
+      chunk,
+      config.sourceVideo,
+      config.outputFolder,
+      { fillMode },
+      sp,
+      subtitlePath,
+      subtitleOptions,
+      bannerOptions
+    );
+    throwIfAborted(signal);
+    outputFiles.push(out);
+    writeSceneMetaFile(out, chunk);
+  }
+
+  const doneMsg = `Created ${outputFiles.length} scene clip(s)`;
+  send({ step: 'Complete!', percent: 100, message: doneMsg });
+  return {
+    success: true,
+    outputFiles,
+    subtitleFailures,
+    storiesDetected: chunks.length
+  };
+}
+
 function register() {
   const mp = new MediaProcessor();
-
   ipcMain.handle('process:start', async (event, config) => {
     if (isRunning) return { success: false, error: 'Process already running' };
 
     const win = BrowserWindow.fromWebContents(event.sender);
     if (!win) return { success: false, error: 'No window' };
 
-    if (!config || !config.sourceVideo || !config.backgroundFolder || !config.outputFolder) {
+    const isCinemaMode = !!config && config.mode === 'cinema';
+    if (!config || !config.sourceVideo || !config.outputFolder || (!isCinemaMode && !config.backgroundFolder)) {
       return { success: false, error: 'Missing required configuration' };
     }
 
@@ -103,7 +302,7 @@ function register() {
     try {
       throwIfAborted(signal);
       if (!fs.existsSync(config.sourceVideo)) return { success: false, error: 'Source media not found' };
-      if (!fs.existsSync(config.backgroundFolder)) return { success: false, error: 'Background folder not found' };
+      if (!isCinemaMode && !fs.existsSync(config.backgroundFolder)) return { success: false, error: 'Background folder not found' };
       if (!fs.existsSync(config.outputFolder)) fs.mkdirSync(config.outputFolder, { recursive: true });
 
       const proxy = await getProxy();
@@ -148,6 +347,14 @@ function register() {
         (msg) => send({ step: 'Transcribing Audio', percent: 20, message: msg })
       );
       throwIfAborted(signal);
+
+      if (isCinemaMode) {
+        return await runCinemaPipeline({
+          config, win, send, signal, tempFiles, mp, whisper, whisperAudioPath,
+          transcriptSegments, sourceAudioDuration, proxy, analysisModels,
+          subtitlesEnabled, subtitleLanguage, subtitleOffsetSec, subtitleOptions
+        });
+      }
 
       if (!transcriptSegments.length) {
         return { success: false, error: 'Whisper returned no transcript.' };

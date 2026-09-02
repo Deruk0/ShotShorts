@@ -48,6 +48,33 @@ const SYSTEM_REFINE_BOUNDARIES = [
   '- JSON only: {"story":{"title":"Короткий заголовок","start_block_id":1,"end_block_id":4,"has_setup":true,"has_resolution":true,"starts_mid_thought":false,"ends_mid_thought":false,"complete":true,"confidence":0.9}}'
 ].join('\n');
 
+// Cinema mode: pick standalone viral scenes from a movie transcript. The
+// model judges scenes by emotional impact — a quiet but plot-critical
+// dialogue is exactly as valuable as loud action.
+const SYSTEM_FIND_SCENES = [
+  'You are a viral short-form video editor choosing the most captivating scenes of a feature film from its transcript. Each chosen scene becomes a standalone vertical clip for TikTok/Shorts/Reels.',
+  '',
+  'GOAL',
+  'Pick the strongest scenes: dramatic confrontations, shocking reveals and twists, important dialogue turning points, confessions, threats, punchlines, emotional peaks, tense action. A powerful quiet dialogue without action is just as valuable as an explosion — judge scenes by emotional and narrative impact, never by volume of speech.',
+  '',
+  'SCENE BOUNDARIES',
+  '- The clip must be understandable on its own: include the minimum context needed and cut right after the scene peak or resolution.',
+  '- Never span two unrelated scenes.',
+  '',
+  'SELF-CHECK before emitting each scene:',
+  '1) Would a person scrolling TikTok stop and finish this clip?',
+  '2) Does it work without any other context from the movie?',
+  'If a check fails, move the boundaries to other visible blocks or drop the scene.',
+  '',
+  'OUTPUT — JSON only, no markdown:',
+  '{"scenes":[{"title":"Короткий заголовок","hook":"Цепляющая фраза для TikTok","start_block_id":12,"end_block_id":18,"intensity":0.9}]}',
+  '- title in Russian, 2-5 words, do not spoil the ending in the title',
+  '- hook in Russian: the most quotable line from the scene or a one-sentence teaser that makes people watch',
+  '- intensity: 0..1 — how strongly the scene hooks a casual viewer (drama, tension, shock)',
+  '- boundaries MUST be integer block ids printed at line starts; never invent ids or timestamps',
+  '- emit only strong scenes; emit nothing rather than weak filler'
+].join('\n');
+
 const groqChatKeyCooldowns = new Map();
 const groqChatKeyCursor = { current: 0 };
 
@@ -439,6 +466,21 @@ class GroqStoryAnalyzer {
     ].join('\n');
   }
 
+  _buildScenePrompt(window, totalDuration, sceneQuota) {
+    const transcriptText = window.blocks.map((block) => this._formatBlockLine(block)).join('');
+    const coreStartId = window.blocks[window.coreStart - window.windowStart]?.id || window.blocks[0]?.id || 1;
+    const coreEndId = window.blocks[window.coreEnd - window.windowStart]?.id || window.blocks[window.blocks.length - 1]?.id || coreStartId;
+
+    return [
+      `The whole movie needs only its best scenes; this transcript part is one of several — emit at most ${sceneQuota} scene(s) whose START is inside core block ids ${String(coreStartId).padStart(3, '0')}..${String(coreEndId).padStart(3, '0')}.`,
+      '- if no strong scene starts in the core range, return {"scenes":[]}',
+      '- blocks outside the core range are overlap context only — use them to judge boundaries, never as boundaries',
+      `- movie duration ${totalDuration.toFixed(2)} sec`,
+      'Blocks:',
+      transcriptText
+    ].join('\n');
+  }
+
   async _requestWindow(apiKey, prompt, reasoningEffort = 'default', signal, requestOptions = {}) {
     throwIfAborted(signal);
     const useJsonMode = requestOptions.useJsonMode !== false;
@@ -652,6 +694,27 @@ class GroqStoryAnalyzer {
       const leftStories = await this._analyzeWindow(split[0], totalDuration, onProgress, `${label}.A`, signal);
       const rightStories = await this._analyzeWindow(split[1], totalDuration, onProgress, `${label}.B`, signal);
       return [...leftStories, ...rightStories];
+    }
+  }
+
+  async _analyzeSceneWindow(window, totalDuration, sceneQuota, onProgress, label, signal) {
+    throwIfAborted(signal);
+    const prompt = this._buildScenePrompt(window, totalDuration, sceneQuota);
+    try {
+      const parsed = await this._requestWindowWithRetry(prompt, onProgress, label, signal);
+      return this._sanitizeWindowScenes(parsed.scenes, window, totalDuration);
+    } catch (err) {
+      if (!isPayloadTooLargeError(err)) throw err;
+
+      const split = this._splitWindow(window);
+      if (!split) {
+        throw new Error(`${label}: request is still too large for Qwen even after compression.`);
+      }
+
+      onProgress?.(`${label}: request too large for Qwen, splitting into smaller windows…`);
+      const leftScenes = await this._analyzeSceneWindow(split[0], totalDuration, sceneQuota, onProgress, `${label}.A`, signal);
+      const rightScenes = await this._analyzeSceneWindow(split[1], totalDuration, sceneQuota, onProgress, `${label}.B`, signal);
+      return [...leftScenes, ...rightScenes];
     }
   }
 
@@ -882,6 +945,162 @@ class GroqStoryAnalyzer {
       story.complete !== false;
   }
 
+  _sanitizeWindowScenes(rawScenes, window, totalDuration) {
+    const scenes = Array.isArray(rawScenes) ? rawScenes : [];
+    const visibleIds = new Set(window.blocks.map((block) => block.id));
+    const coreFirst = window.blocks[window.coreStart - window.windowStart];
+    const coreLast = window.blocks[window.coreEnd - window.windowStart];
+    const coreStartId = coreFirst?.id || 1;
+    const coreEndId = coreLast?.id || this._allBlocks.length;
+
+    return scenes
+      .map((scene) => {
+        const title = normalizeText(scene?.title).slice(0, 80);
+        const hook = normalizeText(scene?.hook).slice(0, 200);
+        const startBlockId = this._resolveBlockId(scene?.start_block_id, scene?.start, 'start');
+        const endBlockId = this._resolveBlockId(scene?.end_block_id, scene?.end, 'end');
+        const startBlock = this._allBlocks[startBlockId - 1];
+        const endBlock = this._allBlocks[endBlockId - 1];
+        return {
+          title,
+          hook,
+          startBlockId,
+          endBlockId,
+          start: startBlock?.start,
+          end: Math.min(totalDuration, endBlock?.end ?? totalDuration),
+          intensity: clampConfidence(scene?.intensity, 0.5)
+        };
+      })
+      .filter((scene) => scene.title && Number.isInteger(scene.startBlockId) && Number.isInteger(scene.endBlockId))
+      .filter((scene) => visibleIds.has(scene.startBlockId) && visibleIds.has(scene.endBlockId))
+      .filter((scene) => scene.endBlockId >= scene.startBlockId)
+      .filter((scene) => Number.isFinite(scene.start) && Number.isFinite(scene.end))
+      .filter((scene) => scene.end - scene.start >= 1)
+      .filter((scene) => scene.startBlockId >= coreStartId && scene.startBlockId <= coreEndId);
+  }
+
+  /**
+   * Cinema mode: choose the most viral movie scenes from the transcript.
+   * Returns { blocks, windows, scenes } where scenes carry title, hook and
+   * block-anchored start/end. No second-pass refinement: scene boundaries
+   * are snapped to speech pauses by the caller (story-padding).
+   */
+  async analyzeScenes(transcriptSegments, totalDuration, sceneCount, onProgress, options = {}) {
+    const signal = options.signal;
+    throwIfAborted(signal);
+
+    if (!this.modelChain.length && !this.apiKeys.length) {
+      throw new Error('No analysis model configured. Build the analysis chain in Settings.');
+    }
+
+    const requested = Math.max(1, Math.min(50, Number(sceneCount) || 10));
+    const blocks = this.buildTranscriptBlocks(transcriptSegments);
+    if (!blocks.length) {
+      throw new Error('Transcript is empty. Whisper returned no usable text.');
+    }
+    this._allBlocks = blocks;
+
+    const windows = this.buildTranscriptWindows(blocks);
+    onProgress?.(`Prepared transcript for scene analysis: ${blocks.length} blocks, ${windows.length} window(s).`);
+    this._systemPrompt = SYSTEM_FIND_SCENES;
+
+    // Spread the scene budget across windows so one early window cannot
+    // consume the whole quota.
+    const perWindowQuota = Math.max(1, Math.ceil(requested / windows.length) + 1);
+
+    const rawScenes = [];
+    for (let i = 0; i < windows.length; i++) {
+      throwIfAborted(signal);
+      const window = windows[i];
+      const label = `Scene window ${i + 1}/${windows.length}`;
+      onProgress?.(`${label}: searching for the strongest scenes…`);
+      const cleaned = await this._analyzeSceneWindow(window, totalDuration, perWindowQuota, onProgress, label, signal);
+      onProgress?.(`${label}: found ${cleaned.length} scene(s).`);
+      rawScenes.push(...cleaned);
+    }
+
+    const merged = this._mergeScenes(rawScenes, totalDuration);
+
+    // Keep only the top-N by intensity, then restore chronological order.
+    const top = merged
+      .sort((a, b) => (b.intensity || 0) - (a.intensity || 0))
+      .slice(0, requested)
+      .sort((a, b) => a.start - b.start);
+
+    if (!top.length) {
+      throw new Error('The model found no usable scenes in this movie.');
+    }
+
+    return {
+      blocks,
+      windows: windows.length,
+      scenes: top.map((scene, index) => ({ ...scene, index: index + 1 }))
+    };
+  }
+
+  _mergeScenes(scenes, totalDuration) {
+    const sorted = [...scenes]
+      .map((scene) => ({
+        ...scene,
+        title: normalizeText(scene.title),
+        hook: normalizeText(scene.hook),
+        start: Math.max(0, Number(scene.start) || 0),
+        end: Math.min(totalDuration, Number(scene.end) || 0),
+        intensity: clampConfidence(scene.intensity, 0.5)
+      }))
+      .filter((scene) => scene.title && scene.end - scene.start >= 1)
+      .sort((a, b) => a.start - b.start);
+
+    const merged = [];
+    for (const scene of sorted) {
+      const prev = merged[merged.length - 1];
+      if (!prev) {
+        merged.push(scene);
+        continue;
+      }
+
+      const duplicate =
+        Math.abs(scene.start - prev.start) <= 8 &&
+        Math.abs(scene.end - prev.end) <= 12 &&
+        titleSimilarity(scene.title, prev.title) >= 0.5;
+
+      if (duplicate) {
+        if (scene.end > prev.end) {
+          prev.end = scene.end;
+          prev.endBlockId = scene.endBlockId;
+        }
+        if ((scene.intensity || 0) >= (prev.intensity || 0)) {
+          prev.hook = scene.hook || prev.hook;
+          prev.intensity = scene.intensity;
+        }
+        prev.confidence = Math.max(prev.confidence || 0, scene.confidence || 0);
+        continue;
+      }
+
+      const overlap = scene.start < prev.end && scene.end > prev.end;
+      if (overlap && (scene.intensity || 0) > (prev.intensity || 0) + 0.2) {
+        // A clearly stronger scene claims the overlapping window.
+        merged[merged.length - 1] = scene;
+        continue;
+      }
+      if (overlap) {
+        prev.end = Math.min(prev.end, scene.start);
+        if (prev.end - prev.start < 1) {
+          merged.pop();
+        }
+      }
+
+      merged.push(scene);
+    }
+
+    return merged.map((scene, index) => ({
+      index: index + 1,
+      ...scene,
+      start: Math.max(0, scene.start),
+      end: Math.max(scene.start + 1, scene.end)
+    }));
+  }
+
   async analyzeTranscript(transcriptSegments, totalDuration, onProgress, options = {}) {
     const signal = options.signal;
     throwIfAborted(signal);
@@ -967,4 +1186,4 @@ class GroqStoryAnalyzer {
   }
 }
 
-module.exports = { GroqStoryAnalyzer, GROQ_QWEN_MODEL, SYSTEM_FIND_STORIES, SYSTEM_REFINE_BOUNDARIES };
+module.exports = { GroqStoryAnalyzer, GROQ_QWEN_MODEL, SYSTEM_FIND_STORIES, SYSTEM_REFINE_BOUNDARIES, SYSTEM_FIND_SCENES };

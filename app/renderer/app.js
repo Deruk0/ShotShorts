@@ -45,6 +45,9 @@ function legacyModeFromEffects(effects) {
 
 const DEFAULT_SETTINGS = {
   proxy: null,
+  generationMode: 'stories',
+  cinemaSceneCount: 10,
+  cinemaFillMode: 'crop',
   subtitlesEnabled: false,
   subtitleStyle: 'Classic',
   subtitleLanguage: 'ru',
@@ -83,6 +86,9 @@ const DEFAULT_SETTINGS = {
 
 const PRESET_SETTING_KEYS = [
   'proxy',
+  'generationMode',
+  'cinemaSceneCount',
+  'cinemaFillMode',
   'subtitlesEnabled',
   'subtitleStyle',
   'subtitleLanguage',
@@ -201,6 +207,17 @@ const I18N = {
     buttons: { generate: 'Generate Videos', cancel: 'Cancel', add: 'Add', createPreset: 'Create', savePreset: 'Save Current', deletePreset: 'Delete Preset', resetStats: 'Reset Statistics' },
     warnings: { noKeys: 'Add AI providers, models and build the transcription & analysis chains in Settings before generating.' },
     labels: {
+      modeTitle: 'Generation Mode',
+      modeStories: 'Stories',
+      modeCinema: 'Cinema',
+      modeHintStories: 'Find complete stories in a long recording and render vertical clips with backgrounds.',
+      modeHintCinema: 'Drop a movie in — AI picks the most viral scenes (dramatic dialogues and action) and renders ready-to-post vertical clips.',
+      cinemaScenesLabel: 'Number of Scenes',
+      cinemaFillLabel: 'Vertical Frame',
+      cinemaFillCrop: 'Center Crop',
+      cinemaFillBlur: 'Blurred Background',
+      cinemaSectionTitle: 'Cinema Mode',
+      cinemaSettingsHint: 'These options apply when the Generator is switched to Cinema mode.',
       sourceTitle: 'Source Audio / Video',
       bgTitle: 'Background Videos Folder',
       outputTitle: 'Output Folder',
@@ -320,6 +337,17 @@ const I18N = {
     buttons: { generate: 'Создать видео', cancel: 'Отмена', add: 'Добавить', createPreset: 'Создать', savePreset: 'Сохранить текущие', deletePreset: 'Удалить пресет', resetStats: 'Сбросить статистику' },
     warnings: { noKeys: 'Добавь провайдеров и модели, собери цепочки транскрибации и анализа в настройках перед запуском.' },
     labels: {
+      modeTitle: 'Режим генерации',
+      modeStories: 'Истории',
+      modeCinema: 'Кино',
+      modeHintStories: 'Находит законченные истории в длинной записи и собирает вертикальные клипы с фонами.',
+      modeHintCinema: 'Закинь фильм — ИИ отберёт самые вирусные сцены (сильные диалоги и экшн) и соберёт готовые вертикальные ролики для заливки.',
+      cinemaScenesLabel: 'Количество сцен',
+      cinemaFillLabel: 'Вертикальный кадр',
+      cinemaFillCrop: 'Центр-кроп',
+      cinemaFillBlur: 'Размытый фон',
+      cinemaSectionTitle: 'Режим кино',
+      cinemaSettingsHint: 'Эти настройки применяются, когда в Генераторе включён режим «Кино».',
       sourceTitle: 'Исходное аудио / видео',
       bgTitle: 'Папка с фоновыми видео',
       outputTitle: 'Папка для вывода',
@@ -453,6 +481,21 @@ function applyTranslations() {
   $('#btn-delete-preset').textContent = t('buttons.deletePreset');
   $('#btn-reset-stats').textContent = t('buttons.resetStats');
   $('#no-keys-warning').textContent = t('warnings.noKeys');
+  const modeTitle = $('#txt-mode-title'); if (modeTitle) modeTitle.textContent = t('labels.modeTitle');
+  const modeStoriesBtn = $('#mode-stories'); if (modeStoriesBtn) modeStoriesBtn.textContent = t('labels.modeStories');
+  const modeCinemaBtn = $('#mode-cinema'); if (modeCinemaBtn) modeCinemaBtn.textContent = t('labels.modeCinema');
+  const modeHint = $('#txt-mode-hint'); if (modeHint) modeHint.textContent = t(currentGenerationMode() === 'cinema' ? 'labels.modeHintCinema' : 'labels.modeHintStories');
+  const cinemaTitle = $('#txt-cinema-title'); if (cinemaTitle) cinemaTitle.textContent = t('labels.cinemaSectionTitle');
+  const cinemaHint = $('#cinema-settings-hint'); if (cinemaHint) cinemaHint.textContent = t('labels.cinemaSettingsHint');
+  const cinemaScenesLabel = $('#txt-cinema-scenes-label'); if (cinemaScenesLabel) cinemaScenesLabel.textContent = t('labels.cinemaScenesLabel');
+  const cinemaFillLabel = $('#txt-cinema-fill-label'); if (cinemaFillLabel) cinemaFillLabel.textContent = t('labels.cinemaFillLabel');
+  const cinemaFillSelect = $('#cinema-fill-mode');
+  if (cinemaFillSelect) {
+    [...cinemaFillSelect.options].forEach((option) => {
+      if (option.value === 'crop') option.textContent = t('labels.cinemaFillCrop');
+      if (option.value === 'blur') option.textContent = t('labels.cinemaFillBlur');
+    });
+  }
   const sTitle = $('#txt-source-title'); if (sTitle) sTitle.textContent = t('labels.sourceTitle');
   const bTitle = $('#txt-bg-title'); if (bTitle) bTitle.textContent = t('labels.bgTitle');
   const oTitle = $('#txt-output-title'); if (oTitle) oTitle.textContent = t('labels.outputTitle');
@@ -611,6 +654,12 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
 function syncSettingsFromControls() {
+  if ($('#cinema-scene-count')) {
+    settings.generationMode = currentGenerationMode();
+    settings.cinemaSceneCount = Math.max(5, Math.min(20, Number($('#cinema-scene-count').value) || 10));
+    settings.cinemaFillMode = $('#cinema-fill-mode')?.value === 'blur' ? 'blur' : 'crop';
+  }
+
   if ($('#proxy-toggle')) {
     if ($('#proxy-toggle').checked) {
       settings.proxy = {
@@ -708,6 +757,10 @@ function syncSettingsToControls() {
 
   $('#subtitles-toggle').checked = !!settings.subtitlesEnabled;
   setSubtitleFieldsExpanded(!!settings.subtitlesEnabled);
+  $('#cinema-scene-count').value = String(Math.max(5, Math.min(20, Number(settings.cinemaSceneCount) || 10)));
+  $('#cinema-scene-count-value').textContent = String(Math.max(5, Math.min(20, Number(settings.cinemaSceneCount) || 10)));
+  $('#cinema-fill-mode').value = settings.cinemaFillMode === 'blur' ? 'blur' : 'crop';
+  applyGenerationModeUi();
   $('#subtitle-style').value = settings.subtitleStyle || 'Classic';
   $('#subtitle-language').value = settings.subtitleLanguage || 'ru';
   $('#subtitle-position').value = settings.subtitlePosition || 'bottom';
@@ -910,6 +963,47 @@ $('#pick-output').addEventListener('click', async () => {
   if (p) { outputFolderPath = p; $('#output-label').textContent = p; $('#output-label').className = 'path'; }
   if (p && settings.activePresetId) saveSettings();
   updateGenerateBtn();
+});
+
+// ===== GENERATION MODE (Stories / Cinema) =====
+function currentGenerationMode() {
+  return settings.generationMode === 'cinema' ? 'cinema' : 'stories';
+}
+
+function applyGenerationModeUi() {
+  const mode = currentGenerationMode();
+  const isCinema = mode === 'cinema';
+  $('#mode-stories').classList.toggle('active', !isCinema);
+  $('#mode-cinema').classList.toggle('active', isCinema);
+  $('#bg-section').style.display = isCinema ? 'none' : '';
+  $('#txt-mode-hint').textContent = t(isCinema ? 'labels.modeHintCinema' : 'labels.modeHintStories');
+  updateGenerateBtn();
+}
+
+function setGenerationMode(mode) {
+  const normalized = mode === 'cinema' ? 'cinema' : 'stories';
+  if (currentGenerationMode() === normalized) return;
+  settings.generationMode = normalized;
+  applyGenerationModeUi();
+  saveSettings();
+}
+
+$('#mode-stories').addEventListener('click', () => setGenerationMode('stories'));
+$('#mode-cinema').addEventListener('click', () => setGenerationMode('cinema'));
+
+$('#cinema-scene-count').addEventListener('input', () => {
+  const value = Math.max(5, Math.min(20, Number($('#cinema-scene-count').value) || 10));
+  $('#cinema-scene-count-value').textContent = String(value);
+  settings.cinemaSceneCount = value;
+});
+
+$('#cinema-scene-count').addEventListener('change', () => {
+  saveSettings();
+});
+
+$('#cinema-fill-mode').addEventListener('change', () => {
+  settings.cinemaFillMode = $('#cinema-fill-mode').value === 'blur' ? 'blur' : 'crop';
+  saveSettings();
 });
 
 // ===== SETTINGS: PRESETS =====
@@ -1992,7 +2086,8 @@ function updateModelCount() {
 
 function updateGenerateBtn() {
   const modelsOk = bothModelsCustom();
-  const canStart = sourcePath && bgFolderPath && outputFolderPath && modelsOk && !isProcessing;
+  const bgRequired = currentGenerationMode() !== 'cinema';
+  const canStart = sourcePath && (!bgRequired || bgFolderPath) && outputFolderPath && modelsOk && !isProcessing;
   $('#btn-generate').disabled = !canStart;
 }
 
@@ -2022,7 +2117,10 @@ async function startGeneration() {
   try {
     const result = await window.api.startProcessing({
       sourceVideo: sourcePath,
-      backgroundFolder: bgFolderPath,
+      mode: currentGenerationMode(),
+      cinemaSceneCount: Math.max(5, Math.min(20, Number(settings.cinemaSceneCount) || 10)),
+      cinemaFillMode: settings.cinemaFillMode === 'blur' ? 'blur' : 'crop',
+      backgroundFolder: currentGenerationMode() === 'cinema' ? '' : bgFolderPath,
       outputFolder: outputFolderPath,
       subtitlesEnabled: !!settings.subtitlesEnabled,
       subtitleStyle: settings.subtitleStyle || 'Classic',
@@ -2110,6 +2208,7 @@ function cancelGeneration() {
 function setControlsDisabled(disabled) {
   const selectors = [
     '#pick-source', '#pick-background', '#pick-output',
+    '#mode-stories', '#mode-cinema', '#cinema-scene-count', '#cinema-fill-mode',
     '#app-language', '#app-theme',
     '#preset-select', '#preset-name-input', '#btn-create-preset', '#btn-save-preset', '#btn-delete-preset',
     '#proxy-toggle',

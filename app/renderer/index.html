@@ -34,6 +34,15 @@
       <div class="generate-section">
 
         <div>
+          <div class="section-title" id="txt-mode-title">Generation Mode</div>
+          <div class="mode-switch" id="mode-switch">
+            <button type="button" class="mode-btn active" id="mode-stories" data-mode="stories">Stories</button>
+            <button type="button" class="mode-btn" id="mode-cinema" data-mode="cinema">Cinema</button>
+          </div>
+          <p class="mode-hint" id="txt-mode-hint">Find complete stories in a long recording and render vertical clips with backgrounds.</p>
+        </div>
+
+        <div>
           <div class="section-title" id="txt-source-title">Source Audio / Video</div>
           <div class="file-picker" id="pick-source">
             <div>
@@ -42,7 +51,7 @@
           </div>
         </div>
 
-        <div>
+        <div id="bg-section">
           <div class="section-title" id="txt-bg-title">Background Videos Folder</div>
           <div class="file-picker" id="pick-background">
             <div>
@@ -250,6 +259,27 @@
             <label class="field-label" id="txt-proxy-pass">Password (optional)</label>
             <input type="password" id="proxy-pass" placeholder="••••••••" />
           </div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="settings-section">
+        <div class="section-title" id="txt-cinema-title">Cinema Mode</div>
+        <p class="hint" id="cinema-settings-hint" style="margin-top:0">These options apply when the Generator is switched to Cinema mode.</p>
+        <div class="field-group">
+          <label class="field-label" id="txt-cinema-scenes-label" for="cinema-scene-count">Number of Scenes</label>
+          <div class="cinema-scenes-row">
+            <input type="range" id="cinema-scene-count" min="5" max="20" step="1" value="10" />
+            <span class="cinema-scenes-value" id="cinema-scene-count-value">10</span>
+          </div>
+        </div>
+        <div class="field-group">
+          <label class="field-label" id="txt-cinema-fill-label" for="cinema-fill-mode">Vertical Frame</label>
+          <select id="cinema-fill-mode" class="strict-select">
+            <option value="crop">Center Crop</option>
+            <option value="blur">Blurred Background</option>
+          </select>
         </div>
       </div>
 
