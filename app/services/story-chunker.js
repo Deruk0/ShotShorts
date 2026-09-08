@@ -173,6 +173,45 @@ function buildStoryChunks(stories, transcriptSegments, options = {}) {
   return finalChunks.map((chunk, index) => ({ ...chunk, index: index + 1 }));
 }
 
+/**
+ * Whole-footage mode: turn the gaps BETWEEN the detected stories (plus the
+ * head and tail of the recording) into standalone fill clips so the output
+ * covers 100% of the source timeline. Existing story clips are untouched.
+ * Gaps shorter than minGapSec are skipped (not worth a separate file).
+ * Pure function.
+ */
+function fillTimelineGaps(stories, totalDuration, options = {}) {
+  const minGapSec = Math.max(5, Number(options.minGapSec) || 30);
+  if (!Number.isFinite(totalDuration) || totalDuration <= 0) return [];
+
+  const spans = (Array.isArray(stories) ? stories : [])
+    .map((story) => ({
+      start: Math.max(0, Number(story?.start) || 0),
+      end: Math.min(totalDuration, Number(story?.end) || 0)
+    }))
+    .filter((span) => span.end > span.start)
+    .sort((a, b) => a.start - b.start);
+
+  const gaps = [];
+  let cursor = 0;
+  for (const span of spans) {
+    if (span.start - cursor >= minGapSec) {
+      gaps.push({ start: cursor, end: span.start });
+    }
+    cursor = Math.max(cursor, span.end);
+  }
+  if (totalDuration - cursor >= minGapSec) {
+    gaps.push({ start: cursor, end: totalDuration });
+  }
+
+  return gaps.map((gap, index) => ({
+    title: options.gapTitle || `Part ${index + 1}`,
+    start: gap.start,
+    end: gap.end,
+    storyCount: 0
+  }));
+}
+
 module.exports = {
   TARGET_CHUNK_DURATION_SEC,
   MIN_CHUNK_DURATION_SEC,
@@ -182,5 +221,6 @@ module.exports = {
   buildChunkProfile,
   buildStoryChunks,
   mergeShortChunks,
-  splitLongStoryAtNaturalBoundaries
+  splitLongStoryAtNaturalBoundaries,
+  fillTimelineGaps
 };

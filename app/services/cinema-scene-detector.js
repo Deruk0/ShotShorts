@@ -14,6 +14,40 @@ const CANDIDATE_POOL_FACTOR = 3;      // ranking pool = factor * requested scene
 const SCENE_CUT_SCORE_MIN = 0.4;      // scdet score above this counts as a hard cut
 const SCDET_FPS = 8;                  // scene detection sampling rate
 
+// --- Cinema clip duration limits (user-configurable) ------------------------
+const CINEMA_TARGET_MIN_SEC = 10;
+const CINEMA_TARGET_MAX_SEC = 300;
+const CINEMA_TARGET_DEFAULT_SEC = 45;
+const CINEMA_MAX_MIN_SEC = 15;
+const CINEMA_MAX_MAX_SEC = 600;
+const CINEMA_MAX_DEFAULT_SEC = 90;
+
+function clampNumber(value, min, max, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.min(max, numeric));
+}
+
+/**
+ * Build the cinema chunker profile from user settings: target scene length
+ * (approximate part size for long scenes) and max scene length (parts are
+ * never longer than this). The minimum part length is derived from the
+ * target so short scenes still stay standalone clips. Pure function.
+ */
+function buildCinemaChunkProfile(config = {}) {
+  const target = clampNumber(config?.cinemaTargetSec, CINEMA_TARGET_MIN_SEC, CINEMA_TARGET_MAX_SEC, CINEMA_TARGET_DEFAULT_SEC);
+  const maxRaw = clampNumber(config?.cinemaMaxSec, CINEMA_MAX_MIN_SEC, CINEMA_MAX_MAX_SEC, CINEMA_MAX_DEFAULT_SEC);
+  const max = Math.max(target, maxRaw);
+
+  return {
+    targetChunkDurationSec: target,
+    minChunkDurationSec: Math.max(5, Math.floor(target / 2.25)),
+    maxChunkDurationSec: max,
+    maxCombinedDurationSec: max,
+    mergeShortChunks: false
+  };
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -282,6 +316,7 @@ module.exports = {
   snapSceneToCuts,
   buildActionScenes,
   analyzeMovieEnergy,
+  buildCinemaChunkProfile,
   normalizeCinemaSceneCount,
   normalizeActionScenes,
   scenesOverlap,

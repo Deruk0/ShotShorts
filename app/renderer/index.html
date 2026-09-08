@@ -34,15 +34,6 @@
       <div class="generate-section">
 
         <div>
-          <div class="section-title" id="txt-mode-title">Generation Mode</div>
-          <div class="mode-switch" id="mode-switch">
-            <button type="button" class="mode-btn active" id="mode-stories" data-mode="stories">Stories</button>
-            <button type="button" class="mode-btn" id="mode-cinema" data-mode="cinema">Cinema</button>
-          </div>
-          <p class="mode-hint" id="txt-mode-hint">Find complete stories in a long recording and render vertical clips with backgrounds.</p>
-        </div>
-
-        <div>
           <div class="section-title" id="txt-source-title">Source Audio / Video</div>
           <div class="file-picker" id="pick-source">
             <div>
@@ -125,32 +116,6 @@
             </optgroup>
           </select>
         </div>
-      </div>
-
-      <div class="divider"></div>
-
-      <div class="settings-section">
-        <div class="section-title" id="txt-presets-title">Presets</div>
-        <div class="preset-grid">
-          <div class="field-group">
-            <label class="field-label" id="txt-preset-select-label" for="preset-select">Active Preset</label>
-            <select id="preset-select">
-              <option value="">No preset selected</option>
-            </select>
-          </div>
-          <div class="field-group">
-            <label class="field-label" id="txt-preset-name-label">New Preset Name</label>
-            <div class="input-row">
-              <input type="text" id="preset-name-input" placeholder="Preset name" />
-              <button class="btn btn-primary" id="btn-create-preset" disabled>Create</button>
-            </div>
-          </div>
-        </div>
-        <div class="preset-actions">
-          <button class="btn btn-secondary" id="btn-save-preset" disabled>Save Current</button>
-          <button class="btn btn-danger" id="btn-delete-preset" disabled>Delete Preset</button>
-        </div>
-        <p class="hint" id="presets-hint">Create presets to save AI models, proxy, subtitle settings, language, and selected folders/files.</p>
       </div>
 
       <div class="divider"></div>
@@ -265,9 +230,46 @@
       <div class="divider"></div>
 
       <div class="settings-section">
+        <div class="section-title" id="txt-mode-title">Generation Mode</div>
+        <div class="mode-switch mode-switch-settings" id="mode-switch">
+          <button type="button" class="mode-btn active" id="mode-stories" data-mode="stories">Stories</button>
+          <button type="button" class="mode-btn" id="mode-cinema" data-mode="cinema">Cinema</button>
+        </div>
+        <p class="mode-hint" id="txt-mode-hint">Find complete stories in a long recording and render vertical clips with backgrounds.</p>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="settings-section">
+        <div class="section-title" id="txt-presets-title">Presets</div>
+        <div class="preset-grid">
+          <div class="field-group">
+            <label class="field-label" id="txt-preset-select-label" for="preset-select">Active Preset</label>
+            <select id="preset-select">
+              <option value="">No preset selected</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label class="field-label" id="txt-preset-name-label">New Preset Name</label>
+            <div class="input-row">
+              <input type="text" id="preset-name-input" placeholder="Preset name" />
+              <button class="btn btn-primary" id="btn-create-preset" disabled>Create</button>
+            </div>
+          </div>
+        </div>
+        <div class="preset-actions">
+          <button class="btn btn-secondary" id="btn-save-preset" disabled>Save Current</button>
+          <button class="btn btn-danger" id="btn-delete-preset" disabled>Delete Preset</button>
+        </div>
+        <p class="hint" id="presets-hint">Create presets to save AI models, proxy, subtitle settings, language, and selected folders/files.</p>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="settings-section">
         <div class="section-title" id="txt-cinema-title">Cinema Mode</div>
         <p class="hint" id="cinema-settings-hint" style="margin-top:0">These options apply when the Generator is switched to Cinema mode.</p>
-        <div class="field-group">
+        <div id="cinema-scene-count-field" class="field-group">
           <label class="field-label" id="txt-cinema-scenes-label" for="cinema-scene-count">Number of Scenes</label>
           <div class="cinema-scenes-row">
             <input type="range" id="cinema-scene-count" min="5" max="20" step="1" value="10" />
@@ -280,6 +282,16 @@
             <option value="crop">Center Crop</option>
             <option value="blur">Blurred Background</option>
           </select>
+        </div>
+        <div class="cinema-duration-row">
+          <div class="field-group">
+            <label class="field-label" id="txt-cinema-target-label" for="cinema-target-sec">Target Length (sec)</label>
+            <input type="number" id="cinema-target-sec" min="10" max="300" step="1" value="45" />
+          </div>
+          <div class="field-group">
+            <label class="field-label" id="txt-cinema-max-label" for="cinema-max-sec">Max Length (sec)</label>
+            <input type="number" id="cinema-max-sec" min="15" max="600" step="1" value="90" />
+          </div>
         </div>
       </div>
 

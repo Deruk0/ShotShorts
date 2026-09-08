@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildStoryChunks } = require('../app/services/story-chunker');
+const { buildStoryChunks, fillTimelineGaps } = require('../app/services/story-chunker');
 
 test('short neighbouring stories are combined until the clip reaches 90 seconds', () => {
   const chunks = buildStoryChunks([
@@ -67,4 +67,33 @@ test('long story stays intact when there is no safe transcript boundary', () => 
 
   assert.equal(chunks.length, 1);
   assert.deepEqual([chunks[0].start, chunks[0].end], [0, 360]);
+});
+
+test('fillTimelineGaps covers head, middle gaps and tail', () => {
+  const stories = [
+    { title: 'A', start: 60, end: 120 },
+    { title: 'B', start: 150, end: 200 }
+  ];
+  const fills = fillTimelineGaps(stories, 300, { minGapSec: 30, gapTitle: 'Фрагмент' });
+
+  // 0-60 head, 120-150 is exactly 30s (>= minGap so kept), 200-300 tail
+  assert.deepEqual(fills.map((f) => [f.start, f.end]), [[0, 60], [120, 150], [200, 300]]);
+  assert.ok(fills.every((f) => f.title === 'Фрагмент'));
+});
+
+test('fillTimelineGaps returns nothing when stories already cover everything', () => {
+  const stories = [{ title: 'A', start: 0, end: 100 }, { title: 'B', start: 100, end: 200 }];
+  assert.deepEqual(fillTimelineGaps(stories, 200, { minGapSec: 30 }), []);
+});
+
+test('fillTimelineGaps handles empty story list (whole footage as one span)', () => {
+  const fills = fillTimelineGaps([], 500, { minGapSec: 30 });
+  assert.equal(fills.length, 1);
+  assert.deepEqual([fills[0].start, fills[0].end], [0, 500]);
+});
+
+test('fillTimelineGaps skips the tail when it is shorter than minGapSec', () => {
+  const stories = [{ title: 'A', start: 0, end: 190 }];
+  const fills = fillTimelineGaps(stories, 200, { minGapSec: 30 });
+  assert.deepEqual(fills, []);
 });

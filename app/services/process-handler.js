@@ -10,10 +10,11 @@ const { FontManager } = require('./font-manager');
 const { getProxy } = require('./store');
 const { isAbortError, runFfmpegCommand, throwIfAborted } = require('./cancellation');
 const { alignStoriesToTranscript } = require('./story-padding');
-const { buildStoryChunks, CINEMA_CHUNK_PROFILE } = require('./story-chunker');
+const { buildStoryChunks, fillTimelineGaps } = require('./story-chunker');
 const {
   buildActionScenes,
   analyzeMovieEnergy,
+  buildCinemaChunkProfile,
   normalizeCinemaSceneCount,
   normalizeActionScenes,
   buildCinemaSceneList,
@@ -25,6 +26,21 @@ const { resolveModelChain } = require('./model-registry');
 let processor = null;
 let isRunning = false;
 let activeAbortController = null;
+
+// Fallback stage tagging for progress events that don't carry an explicit
+// stage field (renderer builds its smooth ETA from these stage ids).
+function inferStageFromStep(step) {
+  const s = String(step || '').toLowerCase();
+  if (/complete|done/.test(s)) return 'finalize';
+  if (/extract/.test(s)) return 'extract';
+  if (/compress|transcript audio/.test(s)) return 'compress';
+  if (/transcrib/.test(s)) return 'transcribe';
+  if (/analyzing scenes|detecting action|cinema mode|scenes selected/.test(s)) return 'scenes';
+  if (/analyz/.test(s)) return 'analyze';
+  if (/font|banner/.test(s)) return 'prepare';
+  if (/render|story|scene|preparing/.test(s)) return 'render';
+  return null;
+}
 
 function normalizeStories(stories, totalDuration) {
   return (Array.isArray(stories) ? stories : [])
@@ -101,8 +117,9 @@ async function runCinemaPipeline(ctx) {
 
   const sceneCount = normalizeCinemaSceneCount(config.cinemaSceneCount);
   const fillMode = config.cinemaFillMode === 'blur' ? 'blur' : 'crop';
+  const chunkProfile = buildCinemaChunkProfile(config);
 
-  send({ step: 'Cinema Mode', percent: 30, message: `Selecting the top ${sceneCount} scenes…` });
+  send({ step: 'Cinema Mode', percent: 30, stage: 'scenes', stagePercent: null, message: `Selecting the top ${sceneCount} scenes…` });
 
   // LLM scene search over dialogue. A movie with no usable speech still
   // produces action-only output instead of failing.
@@ -115,7 +132,7 @@ async function runCinemaPipeline(ctx) {
         transcriptSegments,
         sourceAudioDuration,
         sceneCount,
-        (msg) => send({ step: 'Analyzing Scenes', percent: 34, message: msg }),
+        (msg) => send({ step: 'Analyzing Scenes', percent: 34, stage: 'scenes', stagePercent: null, message: msg }),
         { signal }
       );
       throwIfAborted(signal);
@@ -123,7 +140,7 @@ async function runCinemaPipeline(ctx) {
         .map((scene) => ({ ...scene, hook: scene.hook || '' }));
     } catch (err) {
       if (isAbortError(err) || signal.aborted) throw err;
-      send({ step: 'Analyzing Scenes', percent: 36, message: `Dialogue scene search failed (${err.message}). Falling back to action detection only.` });
+      send({ step: 'Analyzing Scenes', percent: 36, stage: 'scenes', stagePercent: null, message: `Dialogue scene search failed (${err.message}). Falling back to action detection only.` });
     }
   }
 
@@ -134,13 +151,13 @@ async function runCinemaPipeline(ctx) {
     try {
       const energy = await analyzeMovieEnergy(
         config.sourceVideo,
-        (msg) => send({ step: 'Detecting Action', percent: 40, message: msg }),
+        (msg) => send({ step: 'Detecting Action', percent: 40, stage: 'scenes', stagePercent: null, message: msg }),
         signal
       );
       actionScenes = buildActionScenes(energy, transcriptSegments, sourceAudioDuration, remaining);
     } catch (err) {
       if (isAbortError(err) || signal.aborted) throw err;
-      send({ step: 'Detecting Action', percent: 44, message: `Action detection failed (${err.message}). Continuing without action scenes.` });
+      send({ step: 'Detecting Action', percent: 44, stage: 'scenes', stagePercent: null, message: `Action detection failed (${err.message}). Continuing without action scenes.` });
     }
   }
 
@@ -156,10 +173,12 @@ async function runCinemaPipeline(ctx) {
   send({
     step: 'Scenes Selected',
     percent: 46,
+    stage: 'scenes',
+    stagePercent: 100,
     message: `${llmScenes.length} dialogue + ${scenes.length - llmScenes.length} action scene(s) selected`
   });
 
-  const chunks = buildStoryChunks(scenes, transcriptSegments, CINEMA_CHUNK_PROFILE);
+  const chunks = buildStoryChunks(scenes, transcriptSegments, chunkProfile);
   if (!chunks.length) {
     return { success: false, error: 'No valid scene chunks were produced.' };
   }
@@ -169,7 +188,7 @@ async function runCinemaPipeline(ctx) {
     try {
       throwIfAborted(signal);
       const fm = new FontManager();
-      await fm.ensureTtfFonts((msg) => send({ step: 'Preparing Fonts', percent: 48, message: msg }), signal);
+      await fm.ensureTtfFonts((msg) => send({ step: 'Preparing Fonts', percent: 48, stage: 'prepare', stagePercent: null, message: msg }), signal);
       throwIfAborted(signal);
       if (fm.hasAnyTtf()) {
         subtitleOptions.fontsDir = fm.getTtfDir();
@@ -206,7 +225,7 @@ async function runCinemaPipeline(ctx) {
       };
     } catch (bannerErr) {
       if (isAbortError(bannerErr) || signal.aborted) throw bannerErr;
-      send({ step: 'Banner Skipped', percent: 50, message: `Banner disabled: ${bannerErr.message}.` });
+      send({ step: 'Banner Skipped', percent: 50, stage: 'prepare', stagePercent: null, message: `Banner disabled: ${bannerErr.message}.` });
       bannerOptions = null;
     }
   }
@@ -223,6 +242,11 @@ async function runCinemaPipeline(ctx) {
     const sp = (data) => send({
       step: data.step,
       percent: Math.min(percentBase + (data.percent / 100) * perChunkPercent, 96),
+      stage: 'render',
+      stagePercent: data.percent,
+      chunkIndex: i + 1,
+      chunkCount: chunks.length,
+      meta: { sourceDurationSec: sourceAudioDuration, chunkCount: chunks.length },
       message: data.message
     });
 
@@ -267,12 +291,13 @@ async function runCinemaPipeline(ctx) {
   }
 
   const doneMsg = `Created ${outputFiles.length} scene clip(s)`;
-  send({ step: 'Complete!', percent: 100, message: doneMsg });
+  send({ step: 'Complete!', percent: 100, stage: 'finalize', stagePercent: 100, message: doneMsg });
   return {
     success: true,
     outputFiles,
     subtitleFailures,
-    storiesDetected: chunks.length
+    storiesDetected: chunks.length,
+    chunksProduced: chunks.length
   };
 }
 
@@ -296,7 +321,12 @@ function register() {
     activeAbortController = abortController;
     const { signal } = abortController;
 
-    const send = (data) => { try { win.webContents.send('process:progress', data); } catch {} };
+    const send = (data) => {
+      const payload = { ...data };
+      const stage = data?.stage || inferStageFromStep(data?.step);
+      if (stage) payload.stage = stage;
+      try { win.webContents.send('process:progress', payload); } catch {}
+    };
     const tempFiles = [];
 
     try {
@@ -316,19 +346,29 @@ function register() {
         return { success: false, error: 'No AI model selected. Build the transcription and analysis chains in Settings → Custom AI Models.' };
       }
 
-      send({ step: 'Extracting Audio', percent: 2, message: 'Preparing source media…' });
-      const audioPath = await mp.extractAudio(config.sourceVideo, send);
+      send({ step: 'Extracting Audio', percent: 2, stage: 'extract', stagePercent: 0, message: 'Preparing source media…' });
+      const audioPath = await mp.extractAudio(config.sourceVideo, (d) => send({
+        step: d.step,
+        percent: d.percent,
+        stage: 'extract',
+        stagePercent: d.stagePercent,
+        message: d.message
+      }));
       throwIfAborted(signal);
       if (audioPath) tempFiles.push(audioPath);
       const sourceAudioDuration = await mp.getVideoDuration(audioPath);
       throwIfAborted(signal);
       const whisperAudioPath = await prepareAudioForWhisper(audioPath, (data) => send({
         step: data.step,
-        percent: 10,
+        percent: 5 + Math.round((data.percent || 0) * 0.08),
+        stage: 'compress',
+        stagePercent: data.percent,
         message: data.message
       }), signal);
       throwIfAborted(signal);
       if (whisperAudioPath) tempFiles.push(whisperAudioPath);
+      let whisperAudioBytes = 0;
+      try { whisperAudioBytes = fs.statSync(whisperAudioPath).size; } catch {}
 
       const subtitlesEnabled = !!config.subtitlesEnabled;
       const subtitleLanguage = config.subtitleLanguage || 'ru';
@@ -340,11 +380,57 @@ function register() {
 
       const transcriptionLabel = transcriptionModels.map((entry) => `${entry.name} (${entry.modelId})`).join(' → ');
 
-      send({ step: 'Transcribing Audio', percent: 12, message: `Sending audio to ${transcriptionLabel}…` });
+      // Structured transcription progress: message + optional info payload
+      // { chunkIndex, chunkCount } / { upload: { loaded, total, bps, ts } }.
+      const tx = { chunkIndex: 0, chunkCount: 0, upload: null, lastMsg: '' };
+      const transcriptionProgress = (msg, info) => {
+        if (msg) tx.lastMsg = msg;
+        if (info) {
+          if (Number(info.chunkIndex) > 0) {
+            tx.chunkIndex = Number(info.chunkIndex);
+            tx.chunkCount = Math.max(Number(info.chunkCount) || 0, tx.chunkIndex);
+            tx.upload = null;
+          }
+          if (info.upload && Number(info.upload.total) > 0) tx.upload = info.upload;
+        }
+        let stagePercent = null;
+        if (tx.chunkCount > 0) {
+          const base = Math.max(0, tx.chunkIndex - 1) / tx.chunkCount;
+          const within = (tx.upload && tx.upload.total > 0)
+            ? Math.min(1, tx.upload.loaded / tx.upload.total) / tx.chunkCount
+            : 0.5 / tx.chunkCount;
+          stagePercent = Math.min(99, (base + within) * 100);
+        } else if (tx.upload && tx.upload.total > 0) {
+          stagePercent = Math.min(85, (tx.upload.loaded / tx.upload.total) * 85);
+        }
+        const bps = Number(tx.upload?.bps) || 0;
+        const freshUpload = tx.upload && (Date.now() - Number(tx.upload.ts || 0)) < 5000;
+        const speedText = freshUpload && bps > 0 ? `${(bps / 1048576).toFixed(1)} MB/s` : null;
+        send({
+          step: 'Transcribing Audio',
+          percent: stagePercent == null ? 12 : 12 + Math.round((stagePercent / 100) * 18),
+          stage: 'transcribe',
+          stagePercent,
+          chunkIndex: tx.chunkCount > 0 ? tx.chunkIndex : undefined,
+          chunkCount: tx.chunkCount > 0 ? tx.chunkCount : undefined,
+          upload: freshUpload ? { loaded: tx.upload.loaded, total: tx.upload.total, bps, ts: tx.upload.ts } : undefined,
+          message: msg || (speedText ? `Uploading audio… ${speedText}` : (tx.lastMsg || 'Working…')),
+          meta: { sourceDurationSec: sourceAudioDuration, audioBytes: whisperAudioBytes }
+        });
+      };
+
+      send({
+        step: 'Transcribing Audio',
+        percent: 12,
+        stage: 'transcribe',
+        stagePercent: 0,
+        message: `Sending audio to ${transcriptionLabel}…`,
+        meta: { sourceDurationSec: sourceAudioDuration, audioBytes: whisperAudioBytes }
+      });
       const transcriptSegments = await whisper.transcribe(
         whisperAudioPath,
         { language: subtitleLanguage, proxy, signal, models: transcriptionModels },
-        (msg) => send({ step: 'Transcribing Audio', percent: 20, message: msg })
+        transcriptionProgress
       );
       throwIfAborted(signal);
 
@@ -360,13 +446,13 @@ function register() {
         return { success: false, error: 'Whisper returned no transcript.' };
       }
 
-      send({ step: 'Analyzing Stories', percent: 30, message: 'Compressing transcript for analysis…' });
+      send({ step: 'Analyzing Stories', percent: 30, stage: 'analyze', stagePercent: null, message: 'Compressing transcript for analysis…' });
       const analyzer = new GroqStoryAnalyzer([], proxy, null);
       analyzer.setModelChain(analysisModels);
       const analysis = await analyzer.analyzeTranscript(
         transcriptSegments,
         sourceAudioDuration,
-        (msg) => send({ step: 'Analyzing Stories', percent: 36, message: msg }),
+        (msg) => send({ step: 'Analyzing Stories', percent: 36, stage: 'analyze', stagePercent: null, message: msg }),
         { signal }
       );
       throwIfAborted(signal);
@@ -383,6 +469,8 @@ function register() {
       send({
         step: 'Stories Detected',
         percent: 45,
+        stage: 'analyze',
+        stagePercent: 100,
         message: `Found ${normalizedStories.length} stories from ${analysis.blocks.length} transcript blocks`
       });
 
@@ -394,7 +482,25 @@ function register() {
         durations: {}
       };
 
-      const chunks = buildStoryChunks(normalizedStories, transcriptSegments);
+      const storyChunks = buildStoryChunks(normalizedStories, transcriptSegments);
+      // Stories mode covers the WHOLE footage: the gaps between final clips
+      // (intro, outros, unrelated talk) become standalone fill clips so
+      // nothing from the source is lost. Gaps are computed AFTER chunking —
+      // merged story clips change the boundaries.
+      const gapSpans = fillTimelineGaps(storyChunks, sourceAudioDuration, { minGapSec: 30 });
+      const gapChunks = buildStoryChunks(gapSpans, transcriptSegments);
+      const chunks = [...storyChunks, ...gapChunks]
+        .sort((a, b) => a.start - b.start)
+        .map((chunk, index) => ({ ...chunk, index: index + 1 }));
+      if (gapChunks.length > 0) {
+        send({
+          step: 'Stories Detected',
+          percent: 45,
+          stage: 'analyze',
+          stagePercent: 100,
+          message: `Whole-footage mode: +${gapChunks.length} fill clip(s) for the uncovered parts`
+        });
+      }
       if (!chunks.length) {
         return { success: false, error: 'No valid story chunks were produced from Qwen output.' };
       }
@@ -403,7 +509,7 @@ function register() {
         try {
           throwIfAborted(signal);
           const fm = new FontManager();
-          await fm.ensureTtfFonts((msg) => send({ step: 'Preparing Fonts', percent: 48, message: msg }), signal);
+          await fm.ensureTtfFonts((msg) => send({ step: 'Preparing Fonts', percent: 48, stage: 'prepare', stagePercent: null, message: msg }), signal);
           throwIfAborted(signal);
           if (fm.hasAnyTtf()) {
             subtitleOptions.fontsDir = fm.getTtfDir();
@@ -422,7 +528,7 @@ function register() {
       if (config.bannerEnabled && config.bannerPath) {
         const bannerOpacityPct = Math.max(0, Math.min(100, Number(config.bannerOpacity === undefined ? 100 : config.bannerOpacity)));
         if (bannerOpacityPct <= 0) {
-          send({ step: 'Banner Hidden', percent: 50, message: 'Banner visibility is 0% — rendering without banner.' });
+          send({ step: 'Banner Hidden', percent: 50, stage: 'prepare', stagePercent: null, message: 'Banner visibility is 0% — rendering without banner.' });
         } else {
           try {
             throwIfAborted(signal);
@@ -439,7 +545,7 @@ function register() {
             const interstitialDuration = Number(dims.durationSec);
             const interstitialVideo = config.bannerMode === 'interstitial' && !isImageBanner(config.bannerPath);
             if (interstitialVideo && !(interstitialDuration > 0)) {
-              send({ step: 'Banner', percent: 50, message: 'Banner video duration is unknown — falling back to overlay mode.' });
+              send({ step: 'Banner', percent: 50, stage: 'prepare', stagePercent: null, message: 'Banner video duration is unknown — falling back to overlay mode.' });
             }
             const interstitial = interstitialVideo && interstitialDuration > 0
               ? {
@@ -456,7 +562,7 @@ function register() {
               interstitial
             };
             if (interstitial && !dims.hasAudio) {
-              send({ step: 'Banner', percent: 50, message: 'Banner video has no audio track — the pause will be silent.' });
+              send({ step: 'Banner', percent: 50, stage: 'prepare', stagePercent: null, message: 'Banner video has no audio track — the pause will be silent.' });
             }
             // Real-world video banners (edit lists, VFR, rotation, odd sizes,
             // exotic codecs) get normalized once so looping always works.
@@ -467,20 +573,20 @@ function register() {
             if (!bannerOptions.isImage && !interstitial && dims.codecName !== 'gif' && !hasAlphaPixFmt(dims.pixFmt)) {
               try {
                 throwIfAborted(signal);
-                const normalized = await mp.normalizeBannerVideo(bannerOptions.path, dims, (msg) => send({ step: 'Preparing Banner', percent: 50, message: msg }));
+                const normalized = await mp.normalizeBannerVideo(bannerOptions.path, dims, (msg) => send({ step: 'Preparing Banner', percent: 50, stage: 'prepare', stagePercent: null, message: msg }));
                 if (normalized && fs.existsSync(normalized)) {
                   tempFiles.push(normalized);
                   bannerOptions.path = normalized;
                 }
               } catch (normErr) {
                 if (isAbortError(normErr) || signal.aborted) throw normErr;
-                send({ step: 'Banner', percent: 50, message: `Banner normalization failed (${normErr.message}). Using original file.` });
+                send({ step: 'Banner', percent: 50, stage: 'prepare', stagePercent: null, message: `Banner normalization failed (${normErr.message}). Using original file.` });
               }
             }
-            send({ step: 'Banner Ready', percent: 50, message: `Banner ${layout.width}x${layout.height} at ${layout.x},${layout.y} · ${bannerOpacityPct}%` });
+            send({ step: 'Banner Ready', percent: 50, stage: 'prepare', stagePercent: 100, message: `Banner ${layout.width}x${layout.height} at ${layout.x},${layout.y} · ${bannerOpacityPct}%` });
           } catch (bannerErr) {
             if (isAbortError(bannerErr) || signal.aborted) throw bannerErr;
-            send({ step: 'Banner Skipped', percent: 50, message: `Banner disabled: ${bannerErr.message}. Rendering without banner.` });
+            send({ step: 'Banner Skipped', percent: 50, stage: 'prepare', stagePercent: null, message: `Banner disabled: ${bannerErr.message}. Rendering without banner.` });
             bannerOptions = null;
           }
         }
@@ -503,6 +609,11 @@ function register() {
         const sp = (data) => send({
           step: data.step,
           percent: Math.min(percentBase + (data.percent / 100) * perChunkPercent, 96),
+          stage: 'render',
+          stagePercent: data.percent,
+          chunkIndex: i + 1,
+          chunkCount: chunks.length,
+          meta: { sourceDurationSec: sourceAudioDuration, chunkCount: chunks.length },
           message: data.message
         });
 
@@ -539,6 +650,10 @@ function register() {
             send({
               step: `Story ${chunk.index}`,
               percent: percentBase,
+              stage: 'render',
+              stagePercent: 0,
+              chunkIndex: i + 1,
+              chunkCount: chunks.length,
               message: `Subtitle generation failed for story ${chunk.index} (${subtitleErr.message}). Rendering without subtitles.`
             });
           }
@@ -563,20 +678,21 @@ function register() {
         doneMsg += ` - subtitles unavailable for story ${subtitleFailures.join(', ')}`;
       }
 
-      send({ step: 'Complete!', percent: 100, message: doneMsg });
+      send({ step: 'Complete!', percent: 100, stage: 'finalize', stagePercent: 100, message: doneMsg });
       return {
         success: true,
         outputFiles,
         subtitleFailures,
-        storiesDetected: normalizedStories.length
+        storiesDetected: normalizedStories.length,
+        chunksProduced: chunks.length
       };
     } catch (err) {
       if (isAbortError(err) || signal.aborted) {
-        send({ step: 'Cancelled', percent: 0, message: 'Generation cancelled.' });
+        send({ step: 'Cancelled', percent: 0, stage: null, message: 'Generation cancelled.' });
         return { success: false, cancelled: true, error: 'Cancelled' };
       }
       const msg = err.message || 'Unknown error';
-      send({ step: 'Error', percent: 0, message: msg });
+      send({ step: 'Error', percent: 0, stage: null, message: msg });
       return { success: false, error: msg };
     } finally {
       processor = null;

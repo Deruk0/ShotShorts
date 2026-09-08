@@ -120,13 +120,13 @@ class MediaProcessor {
 
   extractAudio(videoPath, onProgress) {
     const out = path.join(os.tmpdir(), `ss_audio_${Date.now()}.wav`);
-    onProgress?.({ step: 'Extracting Audio', percent: 5, message: 'Separating audio track…' });
+    onProgress?.({ step: 'Extracting Audio', percent: 5, stagePercent: 0, message: 'Separating audio track…' });
 
     const cmd = ffmpeg(videoPath)
         .noVideo().audioCodec('pcm_s16le').audioChannels(2).audioFrequency(44100).format('wav').output(out)
         .on('progress', i => {
           if (!this.cancelled) {
-            onProgress?.({ step: 'Extracting Audio', percent: 5 + Math.min(i.percent || 0, 100) * 0.15, message: `${Math.round(i.percent || 0)}%` });
+            onProgress?.({ step: 'Extracting Audio', percent: 5 + Math.min(i.percent || 0, 100) * 0.15, stagePercent: Math.min(i.percent || 0, 100), message: `${Math.round(i.percent || 0)}%` });
           }
         });
 
@@ -139,7 +139,7 @@ class MediaProcessor {
         .audioCodec('pcm_s16le').audioBitrate(16).audioChannels(1).audioFrequency(16000).format('wav').output(out)
         .on('progress', i => {
           if (!this.cancelled) {
-            onProgress?.({ step: 'Analyzing Audio', percent: 22, message: `Optimizing for AI... ${Math.round(i.percent || 0)}%` });
+            onProgress?.({ step: 'Analyzing Audio', percent: 22, stagePercent: Math.min(i.percent || 0, 100), message: `Optimizing for AI... ${Math.round(i.percent || 0)}%` });
           }
         });
 

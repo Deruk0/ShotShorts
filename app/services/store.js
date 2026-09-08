@@ -86,8 +86,18 @@ async function getStore() {
       generationMode: { type: 'string', default: 'stories' },
       cinemaSceneCount: { type: 'number', default: 10 },
       cinemaFillMode: { type: 'string', default: 'crop' },
+      cinemaTargetSec: { type: 'number', default: 45 },
+      cinemaMaxSec: { type: 'number', default: 90 },
       appLanguage: { type: 'string', default: 'en' },
       appTheme: { type: 'string', default: 'dark' },
+      activePresetIdStories: {
+        type: ['string', 'null'],
+        default: null
+      },
+      activePresetIdCinema: {
+        type: ['string', 'null'],
+        default: null
+      },
       activePresetId: {
         type: ['string', 'null'],
         default: null
@@ -105,9 +115,22 @@ async function getStore() {
         properties: {
           totalVideos: { type: 'number', default: 0 },
           totalRenderTimeMs: { type: 'number', default: 0 },
-          lastRun: { type: ['string', 'null'], default: null }
+          lastRun: { type: ['string', 'null'], default: null },
+          stageTimesMs: {
+            type: 'object',
+            additionalProperties: {
+              type: 'object',
+              properties: {
+                totalMs: { type: 'number', default: 0 },
+                perMinMs: { type: 'number', default: 0 },
+                perChunkMs: { type: 'number', default: 0 },
+                samples: { type: 'number', default: 0 }
+              }
+            },
+            default: {}
+          }
         },
-        default: { totalVideos: 0, totalRenderTimeMs: 0, lastRun: null }
+        default: { totalVideos: 0, totalRenderTimeMs: 0, lastRun: null, stageTimesMs: {} }
       }
     };
     storeInstance = new Store({ schema });
@@ -178,8 +201,12 @@ async function getSettings() {
     generationMode: store.get('generationMode'),
     cinemaSceneCount: store.get('cinemaSceneCount'),
     cinemaFillMode: store.get('cinemaFillMode'),
+    cinemaTargetSec: store.get('cinemaTargetSec'),
+    cinemaMaxSec: store.get('cinemaMaxSec'),
     appLanguage: store.get('appLanguage'),
     appTheme: store.get('appTheme'),
+    activePresetIdStories: store.get('activePresetIdStories'),
+    activePresetIdCinema: store.get('activePresetIdCinema'),
     activePresetId: store.get('activePresetId'),
     presets: store.get('presets')
   };
@@ -249,9 +276,20 @@ async function saveSettings(settings) {
   if (settings.cinemaFillMode !== undefined) {
     store.set('cinemaFillMode', settings.cinemaFillMode === 'blur' ? 'blur' : 'crop');
   }
+  if (settings.cinemaTargetSec !== undefined) {
+    const target = Number(settings.cinemaTargetSec);
+    store.set('cinemaTargetSec', Number.isFinite(target) ? Math.max(10, Math.min(300, Math.round(target))) : 45);
+  }
+  if (settings.cinemaMaxSec !== undefined) {
+    const max = Number(settings.cinemaMaxSec);
+    const target = Number(store.get('cinemaTargetSec')) || 45;
+    store.set('cinemaMaxSec', Number.isFinite(max) ? Math.max(target, Math.max(15, Math.min(600, Math.round(max)))) : 90);
+  }
   if (settings.appLanguage !== undefined) store.set('appLanguage', settings.appLanguage);
   if (settings.appTheme !== undefined) store.set('appTheme', settings.appTheme);
   if (settings.activePresetId !== undefined) store.set('activePresetId', settings.activePresetId || null);
+  if (settings.activePresetIdStories !== undefined) store.set('activePresetIdStories', settings.activePresetIdStories || null);
+  if (settings.activePresetIdCinema !== undefined) store.set('activePresetIdCinema', settings.activePresetIdCinema || null);
   if (settings.presets !== undefined) {
     const presets = Array.isArray(settings.presets) ? settings.presets : [];
     store.set('presets', presets);
@@ -265,7 +303,7 @@ async function getProxy() {
 
 async function getStats() {
   const store = await getStore();
-  return store.get('stats') || { totalVideos: 0, totalRenderTimeMs: 0, lastRun: null };
+  return store.get('stats') || { totalVideos: 0, totalRenderTimeMs: 0, lastRun: null, stageTimesMs: {} };
 }
 
 async function saveStats(stats) {

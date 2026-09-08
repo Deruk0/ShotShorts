@@ -1,6 +1,6 @@
 // ===== STATE =====
 let settings = { proxy: null, customProviders: [], customModels: [], transcriptionChain: [], analysisChain: [] };
-let stats = { totalVideos: 0, totalRenderTimeMs: 0, lastRun: null };
+let stats = { totalVideos: 0, totalRenderTimeMs: 0, lastRun: null, stageTimesMs: {} };
 let sourcePath = null;
 let bgFolderPath = null;
 let outputFolderPath = null;
@@ -9,15 +9,314 @@ let cancelRequested = false;
 let progressCleanup = null;
 let processStartTime = null;
 let etaInterval = null;
-let progressSamples = [];
-let lastProgressPercent = 0;
-let lastProgressTime = 0;
 let uiLang = 'en';
 let subtitlePreviewInterval = null;
 let subtitlePreviewChunks = [];
 let subtitlePreviewChunkIndex = 0;
 let bannerAspect = null;
 let bannerThumbnail = null;
+let etaEstimator = null;
+
+// ===== SMART ETA ESTIMATOR =====
+// Stage-weighted progress model with per-stage timing history, live upload
+// speed sampling, monotonic smoothed percent and a rate-limited ETA readout.
+// Weights (share of total wall time per stage; defaults refined from stats).
+const STAGE_WEIGHTS = {
+  extract: 0.10,
+  compress: 0.08,
+  transcribe: 0.28,
+  analyze: 0.10,
+  scenes: 0.14,
+  prepare: 0.03,
+  render: 0.25,
+  finalize: 0.02
+};
+const STAGE_ORDER = ['extract', 'compress', 'transcribe', 'analyze', 'scenes', 'prepare', 'render', 'finalize'];
+const CINEMA_SKIP_STAGES = new Set(['compress']);
+// Fallback expected durations when nothing is known yet (no history, no
+// stagePercent flow yet). Kept conservative so early ETA is not absurdly low.
+const DEFAULT_STAGE_MS = {
+  extract: 20000,
+  compress: 15000,
+  transcribe: 60000,
+  analyze: 45000,
+  scenes: 60000,
+  prepare: 8000,
+  render: 60000,
+  finalize: 2000
+};
+
+const EtaHistory = {
+  record(entry, stage, elapsedMs, perMinMs, chunkCount) {
+    if (!STAGE_ORDER.includes(stage)) return;
+    const prev = entry[stage] || { totalMs: 0, perMinMs: 0, samples: 0, perChunkMs: 0 };
+    // EMA keeps the model adapting to changing hardware/network instead of
+    // being dominated by a single slow run.
+    const w = prev.samples >= 4 ? 0.35 : 0.6;
+    entry[stage] = {
+      totalMs: prev.totalMs ? Math.round(prev.totalMs * (1 - w) + elapsedMs * w) : Math.round(elapsedMs),
+      perMinMs: prev.perMinMs ? Math.round(prev.perMinMs * (1 - w) + perMinMs * w) : Math.round(perMinMs),
+      samples: prev.samples + 1,
+      perChunkMs: (chunkCount > 0 && prev.perChunkMs)
+        ? Math.round(prev.perChunkMs * (1 - w) + (elapsedMs / chunkCount) * w)
+        : (chunkCount > 0 ? Math.round(elapsedMs / chunkCount) : 0)
+    };
+  }
+};
+
+function createEtaEstimator(priorStageTimes, opts = {}) {
+  const isCinema = !!opts.isCinema;
+  const nowFn = typeof opts.now === 'function' ? opts.now : Date.now;
+  const activeStages = STAGE_ORDER.filter((s) => !(isCinema && CINEMA_SKIP_STAGES.has(s)));
+  const weightSum = activeStages.reduce((acc, s) => acc + (STAGE_WEIGHTS[s] || 0), 0) || 1;
+
+  const stages = new Map();     // stage -> { startAt, percent, hasPercent, firstPercentAt, chunkIndex, chunkCount }
+  let currentStage = null;
+  let lastEventAt = nowFn();
+  let sourceMinutes = 0;        // from meta.sourceDurationSec (arrives with transcribe/render events)
+  let chunkCount = 0;
+
+  let displayPercent = 0;       // monotonic smoothed bar percent
+  let lastEaseAt = nowFn();
+  let displayEtaMs = null;      // smoothed ETA
+  let holdUntil = 0;            // ETA recompute throttle
+
+  // Live upload speed (bytes/s): short window speed EMA-fed into long EMA.
+  let uploadEmaBps = 0;
+  let uploadWindowBps = 0;
+  let uploadLastLoaded = -1;
+  let uploadLastAt = 0;
+  let lastUploadSeenAt = 0;
+
+  const priorFor = (stage) => {
+    const p = priorStageTimes[stage];
+    if (!p) return 0;
+    if (stage === 'render') {
+      if (p.perChunkMs > 0 && chunkCount > 0) return p.perChunkMs * chunkCount;
+      if (p.totalMs > 0) return p.totalMs;
+      return 0;
+    }
+    if (p.perMinMs > 0 && sourceMinutes > 0.2) return p.perMinMs * sourceMinutes;
+    if (p.totalMs > 0) return p.totalMs;
+    return 0;
+  };
+
+  // Expected wall time of a stage: live projection from stagePercent flow
+  // blended with the learned prior; prior only when no percent is available.
+  const stageExpectedMs = (stage, st, now) => {
+    const prior = priorFor(stage);
+    if (st && st.hasPercent && st.percent > 3 && st.firstPercentAt) {
+      const elapsed = Math.max(500, now - st.firstPercentAt);
+      const projection = elapsed * (100 / Math.max(4, st.percent));
+      if (prior > 0) {
+        const w = Math.min(0.8, 0.5 + (st.percent / 100) * 0.35);
+        return projection * w + prior * (1 - w);
+      }
+      return projection;
+    }
+    return prior > 0 ? prior : (DEFAULT_STAGE_MS[stage] || 20000);
+  };
+
+  // Fraction of the stage completed:
+  //  • chunked stages (render): (chunkIndex-1 + chunkPercent/100) / chunkCount;
+  //  • percent-driven stages: stagePercent/100 (capped so a live stage never
+  //    claims full completion — the tail belongs to server processing);
+  //  • percent-less stages (LLM waits): time-based creep against the
+  //    expected duration, which keeps the bar and ETA moving.
+  const stageFraction = (stage, st, now) => {
+    if (!st) return 0;
+    if (st.chunkCount > 0) {
+      const within = st.hasPercent ? Math.min(1, st.percent / 100) : 0;
+      return Math.max(0, Math.min(0.999, ((st.chunkIndex - 1) + within) / st.chunkCount));
+    }
+    if (st.hasPercent) return Math.max(0, Math.min(0.995, st.percent / 100));
+    const expected = stageExpectedMs(stage, st, now);
+    return Math.max(0, Math.min(0.9, (now - st.startAt) / Math.max(expected, 1000)));
+  };
+
+  // The furthest stage actually seen marks every earlier SEEN stage as past.
+  // Stages that never appeared (banner disabled, fonts cached) simply stay at
+  // fraction 0 — they must not be silently counted as finished.
+  const furthestSeenIdx = () => {
+    let maxIdx = -1;
+    for (const s of stages.keys()) {
+      maxIdx = Math.max(maxIdx, STAGE_ORDER.indexOf(s));
+    }
+    return maxIdx;
+  };
+
+  const computeTargetPercent = (now) => {
+    const maxIdx = furthestSeenIdx();
+    let sum = 0;
+    for (const s of activeStages) {
+      const w = STAGE_WEIGHTS[s] || 0;
+      if (!w) continue;
+      const idx = STAGE_ORDER.indexOf(s);
+      const frac = (idx < maxIdx && stages.has(s)) ? 1 : stageFraction(s, stages.get(s), now);
+      sum += w * frac;
+    }
+    return Math.min(100, (sum / weightSum) * 100);
+  };
+
+  const computeRemainingMs = (now) => {
+    const maxIdx = furthestSeenIdx();
+    let remaining = 0;
+    for (const s of activeStages) {
+      const w = STAGE_WEIGHTS[s] || 0;
+      if (!w) continue;
+      const idx = STAGE_ORDER.indexOf(s);
+      if (idx < maxIdx && stages.has(s)) continue;
+      const st = stages.get(s);
+      const expected = stageExpectedMs(s, st, now);
+      const frac = stageFraction(s, st, now);
+      let rest = Math.max(0, expected * (1 - frac));
+      // The current stage keeps a small tail floor: percent can hit 100
+      // (upload finished) while the API is still processing the response.
+      if (idx === maxIdx && st) {
+        rest = Math.max(rest, Math.min(expected * 0.25, 20000));
+      }
+      remaining += rest;
+    }
+    return remaining;
+  };
+
+  // ETA smoothing: asymmetric (down fast, up slow), jump-capped, throttled to
+  // one recompute per 2s so the readout never flickers back and forth.
+  // A stage is "past" once a newer stage has started (the models don't go
+  // backwards); currentChunkIndex resets to 0 until the next render event.
+  const publishEta = (now) => {
+    if (displayEtaMs !== null && now < holdUntil) return;
+    const raw = computeRemainingMs(now);
+    let next;
+    if (displayEtaMs === null) {
+      next = raw;
+    } else {
+      const k = raw < displayEtaMs ? 0.4 : 0.18;
+      next = displayEtaMs + (raw - displayEtaMs) * k;
+      const maxDelta = Math.max(25000, displayEtaMs * 0.3);
+      next = Math.max(displayEtaMs - maxDelta, Math.min(displayEtaMs + maxDelta, next));
+    }
+    displayEtaMs = Math.max(1000, next);
+    holdUntil = now + 2000;
+  };
+
+  return {
+    onEvent(data) {
+      const now = nowFn();
+      lastEventAt = now;
+      if (data.meta && Number(data.meta.sourceDurationSec) > 0) {
+        sourceMinutes = Number(data.meta.sourceDurationSec) / 60;
+      }
+      if (data.stage === 'render' && Number(data.chunkCount) > 0) {
+        chunkCount = Math.max(chunkCount, Number(data.chunkCount));
+      }
+
+      // Short internet speed samples from the upload byte progress.
+      const up = data.upload;
+      if (up && Number(up.total) > 0) {
+        const loaded = Number(up.loaded) || 0;
+        const ts = Number(up.ts) || now;
+        if (uploadLastLoaded < 0 || loaded < uploadLastLoaded) {
+          uploadWindowBps = 0; // new chunk / retry — restart the window
+        } else if (loaded > uploadLastLoaded) {
+          const dt = (ts - uploadLastAt) / 1000;
+          const db = loaded - uploadLastLoaded;
+          if (dt > 0.25 && db > 0) {
+            const inst = db / dt;
+            uploadWindowBps = uploadWindowBps ? uploadWindowBps * 0.6 + inst * 0.4 : inst;
+          }
+        }
+        uploadLastLoaded = loaded;
+        uploadLastAt = ts;
+        lastUploadSeenAt = now;
+        uploadEmaBps = uploadEmaBps ? uploadEmaBps * 0.8 + uploadWindowBps * 0.2 : uploadWindowBps;
+      }
+
+      const stage = data.stage;
+      if (stage && STAGE_ORDER.includes(stage)) {
+        if (!stages.has(stage)) {
+          stages.set(stage, { firstStartAt: now, startAt: now, percent: 0, hasPercent: false, firstPercentAt: 0, chunkIndex: 0, chunkCount: 0 });
+        }
+        if (stage !== currentStage) currentStage = stage;
+        const st = stages.get(stage);
+        const ci = Number(data.chunkIndex) || 0;
+        const cc = Number(data.chunkCount) || 0;
+        if (cc > 0) {
+          if (ci !== st.chunkIndex) {
+            // New chunk within the same stage: reset only the per-chunk flow.
+            st.chunkIndex = ci;
+            st.startAt = now;
+            st.percent = 0;
+            st.hasPercent = false;
+            st.firstPercentAt = 0;
+          }
+          st.chunkCount = cc;
+        }
+        const sp = Number(data.stagePercent);
+        if (Number.isFinite(sp)) {
+          const p = Math.max(0, Math.min(100, sp));
+          if (!st.hasPercent && p > 0) { st.hasPercent = true; st.firstPercentAt = now; }
+          if (p > st.percent) st.percent = p;
+        }
+      }
+    },
+
+    tick(now = null) {
+      now = now ?? nowFn();
+      const idleMs = now - lastEventAt;
+      const stalled = idleMs > 45000;
+      if (!stalled) {
+        // Monotonic easing of the bar toward the stage-model target.
+        const dtSec = Math.min(3, Math.max(0.05, (now - lastEaseAt) / 1000));
+        lastEaseAt = now;
+        const target = computeTargetPercent(now);
+        const diff = target - displayPercent;
+        if (diff > 0) {
+          const step = Math.min(diff, Math.max(0.25, Math.min(10, diff * 0.35)) * dtSec);
+          displayPercent += step;
+        }
+        publishEta(now);
+      }
+      return {
+        percent: displayPercent,
+        etaMs: stalled ? null : displayEtaMs,
+        stalled,
+        speedBps: (now - lastUploadSeenAt < 5000 && uploadEmaBps > 0) ? uploadEmaBps : 0
+      };
+    },
+
+    complete() {
+      displayPercent = 100;
+    },
+
+    getPercent() {
+      return displayPercent;
+    },
+
+    collectStageDurations(now = null) {
+      now = now ?? nowFn();
+      const seen = [];
+      for (const s of STAGE_ORDER) {
+        const st = stages.get(s);
+        if (st && st.firstStartAt) seen.push({ stage: s, startAt: st.firstStartAt });
+      }
+      const out = {};
+      for (let i = 0; i < seen.length; i++) {
+        const endAt = i + 1 < seen.length ? seen[i + 1].startAt : now;
+        out[seen[i].stage] = { ms: Math.max(0, endAt - seen[i].startAt), complete: i + 1 < seen.length };
+      }
+      return out;
+    },
+
+    currentChunkCount() {
+      return chunkCount;
+    },
+
+    getSourceMinutes() {
+      return sourceMinutes;
+    }
+  };
+}
 
 function getSelectedKaraokeEffects() {
   const effects = [];
@@ -48,6 +347,8 @@ const DEFAULT_SETTINGS = {
   generationMode: 'stories',
   cinemaSceneCount: 10,
   cinemaFillMode: 'crop',
+  cinemaTargetSec: 45,
+  cinemaMaxSec: 90,
   subtitlesEnabled: false,
   subtitleStyle: 'Classic',
   subtitleLanguage: 'ru',
@@ -89,6 +390,8 @@ const PRESET_SETTING_KEYS = [
   'generationMode',
   'cinemaSceneCount',
   'cinemaFillMode',
+  'cinemaTargetSec',
+  'cinemaMaxSec',
   'subtitlesEnabled',
   'subtitleStyle',
   'subtitleLanguage',
@@ -218,6 +521,8 @@ const I18N = {
       cinemaFillBlur: 'Blurred Background',
       cinemaSectionTitle: 'Cinema Mode',
       cinemaSettingsHint: 'These options apply when the Generator is switched to Cinema mode.',
+      cinemaTargetLabel: 'Target Length (sec)',
+      cinemaMaxLabel: 'Max Length (sec)',
       sourceTitle: 'Source Audio / Video',
       bgTitle: 'Background Videos Folder',
       outputTitle: 'Output Folder',
@@ -327,7 +632,7 @@ const I18N = {
       statLast: 'Last Run',
       eta: {
         remaining: 'Remaining',
-        waiting: 'Waiting for response…'
+        waiting: 'Estimating…'
       }
     }
   },
@@ -348,6 +653,8 @@ const I18N = {
       cinemaFillBlur: 'Размытый фон',
       cinemaSectionTitle: 'Режим кино',
       cinemaSettingsHint: 'Эти настройки применяются, когда в Генераторе включён режим «Кино».',
+      cinemaTargetLabel: 'Целевая длина (сек)',
+      cinemaMaxLabel: 'Макс. длина (сек)',
       sourceTitle: 'Исходное аудио / видео',
       bgTitle: 'Папка с фоновыми видео',
       outputTitle: 'Папка для вывода',
@@ -457,7 +764,7 @@ const I18N = {
       statLast: 'Последний запуск',
       eta: {
         remaining: 'Осталось',
-        waiting: 'Осталось: ожидание ответа…'
+        waiting: 'Оцениваю…'
       }
     }
   }
@@ -487,6 +794,8 @@ function applyTranslations() {
   const modeHint = $('#txt-mode-hint'); if (modeHint) modeHint.textContent = t(currentGenerationMode() === 'cinema' ? 'labels.modeHintCinema' : 'labels.modeHintStories');
   const cinemaTitle = $('#txt-cinema-title'); if (cinemaTitle) cinemaTitle.textContent = t('labels.cinemaSectionTitle');
   const cinemaHint = $('#cinema-settings-hint'); if (cinemaHint) cinemaHint.textContent = t('labels.cinemaSettingsHint');
+  const cinemaTargetLabel = $('#txt-cinema-target-label'); if (cinemaTargetLabel) cinemaTargetLabel.textContent = t('labels.cinemaTargetLabel');
+  const cinemaMaxLabel = $('#txt-cinema-max-label'); if (cinemaMaxLabel) cinemaMaxLabel.textContent = t('labels.cinemaMaxLabel');
   const cinemaScenesLabel = $('#txt-cinema-scenes-label'); if (cinemaScenesLabel) cinemaScenesLabel.textContent = t('labels.cinemaScenesLabel');
   const cinemaFillLabel = $('#txt-cinema-fill-label'); if (cinemaFillLabel) cinemaFillLabel.textContent = t('labels.cinemaFillLabel');
   const cinemaFillSelect = $('#cinema-fill-mode');
@@ -630,9 +939,12 @@ async function loadSettings() {
     };
     settings.appTheme = normalizeTheme(settings.appTheme);
     settings.presets = normalizePresets(settings.presets);
-    if (settings.activePresetId && !settings.presets.some((preset) => preset.id === settings.activePresetId)) {
-      settings.activePresetId = null;
-    }
+    ['activePresetId', 'activePresetIdStories', 'activePresetIdCinema'].forEach((key) => {
+      if (settings[key] && !settings.presets.some((preset) => preset.id === settings[key])) {
+        settings[key] = null;
+      }
+    });
+    syncActivePresetIdAlias();
   } catch (err) {
     console.error('Failed to load settings:', err);
     settings = { ...DEFAULT_SETTINGS, presets: [] };
@@ -658,6 +970,11 @@ function syncSettingsFromControls() {
     settings.generationMode = currentGenerationMode();
     settings.cinemaSceneCount = Math.max(5, Math.min(20, Number($('#cinema-scene-count').value) || 10));
     settings.cinemaFillMode = $('#cinema-fill-mode')?.value === 'blur' ? 'blur' : 'crop';
+    if ($('#cinema-target-sec')) {
+      const target = clampCinemaTarget($('#cinema-target-sec').value);
+      settings.cinemaTargetSec = target;
+      settings.cinemaMaxSec = clampCinemaMax($('#cinema-max-sec')?.value, target);
+    }
   }
 
   if ($('#proxy-toggle')) {
@@ -760,6 +1077,8 @@ function syncSettingsToControls() {
   $('#cinema-scene-count').value = String(Math.max(5, Math.min(20, Number(settings.cinemaSceneCount) || 10)));
   $('#cinema-scene-count-value').textContent = String(Math.max(5, Math.min(20, Number(settings.cinemaSceneCount) || 10)));
   $('#cinema-fill-mode').value = settings.cinemaFillMode === 'blur' ? 'blur' : 'crop';
+  $('#cinema-target-sec').value = String(clampCinemaTarget(settings.cinemaTargetSec));
+  $('#cinema-max-sec').value = String(clampCinemaMax(settings.cinemaMaxSec, clampCinemaTarget(settings.cinemaTargetSec)));
   applyGenerationModeUi();
   $('#subtitle-style').value = settings.subtitleStyle || 'Classic';
   $('#subtitle-language').value = settings.subtitleLanguage || 'ru';
@@ -806,39 +1125,66 @@ function syncSettingsToControls() {
   window.SharpSelect?.refreshAll();
 }
 
+// ===== PRESETS (per generation mode) =====
+// Each preset stores its own generationMode; the dropdown only shows the
+// presets of the currently selected mode, and each mode remembers its own
+// active preset.
+function presetMode(preset) {
+  return preset?.settings?.generationMode === 'cinema' ? 'cinema' : 'stories';
+}
+
+function activePresetIdKey(mode) {
+  return mode === 'cinema' ? 'activePresetIdCinema' : 'activePresetIdStories';
+}
+
+function presetsForCurrentMode() {
+  const mode = currentGenerationMode();
+  return normalizePresets(settings.presets).filter((preset) => presetMode(preset) === mode);
+}
+
+function syncActivePresetIdAlias() {
+  // `activePresetId` stays as the per-mode pointer alias so the rest of the
+  // code (paths restore, snapshot updates) keeps working unchanged.
+  settings.activePresetId = settings[activePresetIdKey(currentGenerationMode())] || null;
+}
+
 function renderPresets() {
   const select = $('#preset-select');
   if (!select) return;
 
-  const presets = normalizePresets(settings.presets);
-  settings.presets = presets;
+  const allPresets = normalizePresets(settings.presets);
+  settings.presets = allPresets;
+  const visible = presetsForCurrentMode();
   select.innerHTML = '';
 
-  if (presets.length === 0) {
+  if (visible.length === 0) {
     const emptyOption = document.createElement('option');
     emptyOption.value = '';
     emptyOption.textContent = t('labels.noPreset');
     select.appendChild(emptyOption);
   }
 
-  presets.forEach((preset) => {
+  visible.forEach((preset) => {
     const option = document.createElement('option');
     option.value = preset.id;
     option.textContent = preset.name;
     select.appendChild(option);
   });
 
-  if (settings.activePresetId && presets.some((preset) => preset.id === settings.activePresetId)) {
-    select.value = settings.activePresetId;
-  } else if (presets.length > 0) {
-    settings.activePresetId = presets[0].id;
-    select.value = settings.activePresetId;
+  const idKey = activePresetIdKey(currentGenerationMode());
+  const activeId = settings[idKey];
+  if (activeId && visible.some((preset) => preset.id === activeId)) {
+    select.value = activeId;
+  } else if (visible.length > 0) {
+    settings[idKey] = visible[0].id;
+    select.value = visible[0].id;
   } else {
-    settings.activePresetId = null;
+    settings[idKey] = null;
     select.value = '';
   }
+  syncActivePresetIdAlias();
 
-  const hasActive = !!settings.activePresetId;
+  const hasActive = !!settings[idKey];
   $('#btn-save-preset').disabled = !hasActive || isProcessing;
   $('#btn-delete-preset').disabled = !hasActive || isProcessing;
   window.SharpSelect?.refresh(select);
@@ -861,7 +1207,8 @@ async function createPreset() {
   };
 
   settings.presets = [...normalizePresets(settings.presets), preset];
-  settings.activePresetId = preset.id;
+  settings[activePresetIdKey(currentGenerationMode())] = preset.id;
+  syncActivePresetIdAlias();
   input.value = '';
   $('#btn-create-preset').disabled = true;
   await saveSettings();
@@ -877,7 +1224,8 @@ async function saveCurrentPreset() {
 
 async function applyPreset(id) {
   if (!id) {
-    settings.activePresetId = null;
+    settings[activePresetIdKey(currentGenerationMode())] = null;
+    syncActivePresetIdAlias();
     await saveSettings();
     renderPresets();
     return;
@@ -887,6 +1235,9 @@ async function applyPreset(id) {
   const preset = presets.find((item) => item.id === id);
   if (!preset) return;
 
+  // Presets are per-mode: a preset saved in another mode never applies here.
+  if (presetMode(preset) !== currentGenerationMode()) return;
+
   settings = {
     ...settings,
     ...DEFAULT_SETTINGS,
@@ -894,6 +1245,7 @@ async function applyPreset(id) {
     presets,
     activePresetId: preset.id
   };
+  settings[activePresetIdKey(currentGenerationMode())] = preset.id;
 
   sourcePath = preset.paths?.sourcePath || null;
   bgFolderPath = preset.paths?.bgFolderPath || null;
@@ -906,18 +1258,23 @@ async function applyPreset(id) {
 }
 
 async function deleteActivePreset() {
-  if (!settings.activePresetId) return;
-  const activePreset = normalizePresets(settings.presets).find((preset) => preset.id === settings.activePresetId);
+  const idKey = activePresetIdKey(currentGenerationMode());
+  if (!settings[idKey]) return;
+  const activePreset = normalizePresets(settings.presets).find((preset) => preset.id === settings[idKey]);
   const name = activePreset?.name || 'preset';
   const message = uiLang === 'ru'
     ? `Удалить пресет "${name}"?`
     : `Delete preset "${name}"?`;
   if (!window.confirm(message)) return;
 
-  settings.presets = normalizePresets(settings.presets).filter((preset) => preset.id !== settings.activePresetId);
-  settings.activePresetId = null;
-  if (settings.presets.length > 0) {
-    await applyPreset(settings.presets[0].id);
+  settings.presets = normalizePresets(settings.presets).filter((preset) => preset.id !== settings[idKey]);
+  settings[idKey] = null;
+  syncActivePresetIdAlias();
+
+  // Fall back to the next preset of the SAME mode, not another mode's one.
+  const nextSameMode = presetsForCurrentMode().find((preset) => preset.id !== (activePreset?.id));
+  if (nextSameMode) {
+    await applyPreset(nextSameMode.id);
     return;
   }
   await saveSettings();
@@ -975,8 +1332,13 @@ function applyGenerationModeUi() {
   const isCinema = mode === 'cinema';
   $('#mode-stories').classList.toggle('active', !isCinema);
   $('#mode-cinema').classList.toggle('active', isCinema);
-  $('#bg-section').style.display = isCinema ? 'none' : '';
   $('#txt-mode-hint').textContent = t(isCinema ? 'labels.modeHintCinema' : 'labels.modeHintStories');
+  // Scene count is a cinema-only setting: in stories mode the whole source
+  // footage goes into the output clips.
+  const sceneCountField = $('#cinema-scene-count-field');
+  if (sceneCountField) sceneCountField.style.display = isCinema ? '' : 'none';
+  syncActivePresetIdAlias();
+  renderPresets();
   updateGenerateBtn();
 }
 
@@ -1003,6 +1365,39 @@ $('#cinema-scene-count').addEventListener('change', () => {
 
 $('#cinema-fill-mode').addEventListener('change', () => {
   settings.cinemaFillMode = $('#cinema-fill-mode').value === 'blur' ? 'blur' : 'crop';
+  saveSettings();
+});
+
+function clampCinemaTarget(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 45;
+  return Math.max(10, Math.min(300, Math.round(n)));
+}
+
+function clampCinemaMax(value, targetSec) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 90;
+  return Math.max(targetSec, Math.max(15, Math.min(600, Math.round(n))));
+}
+
+$('#cinema-target-sec').addEventListener('change', () => {
+  const target = clampCinemaTarget($('#cinema-target-sec').value);
+  $('#cinema-target-sec').value = String(target);
+  settings.cinemaTargetSec = target;
+  // Max can never be smaller than target — sync it when needed.
+  if (clampCinemaMax($('#cinema-max-sec').value, target) < target || Number($('#cinema-max-sec').value) < target) {
+    const max = clampCinemaMax($('#cinema-max-sec').value, target);
+    $('#cinema-max-sec').value = String(max);
+    settings.cinemaMaxSec = max;
+  }
+  saveSettings();
+});
+
+$('#cinema-max-sec').addEventListener('change', () => {
+  const target = clampCinemaTarget($('#cinema-target-sec').value);
+  const max = clampCinemaMax($('#cinema-max-sec').value, target);
+  $('#cinema-max-sec').value = String(max);
+  settings.cinemaMaxSec = max;
   saveSettings();
 });
 
@@ -1134,7 +1529,10 @@ function renderCustomModels() {
     models.forEach((model) => {
       const tag = document.createElement('span');
       tag.className = 'key-tag';
-      tag.textContent = `${model.name} · ${model.modelId} `;
+      const provider = getProviders().find((p) => p.id === model.providerId);
+      const label = provider ? `${model.name} · ${provider.name}` : model.name;
+      tag.textContent = `${label} `;
+      tag.title = model.modelId;
       const removeBtn = document.createElement('button');
       removeBtn.className = 'remove';
       removeBtn.title = 'Remove model';
@@ -1169,7 +1567,8 @@ function renderChainSelect(role) {
   models.forEach((model) => {
     const option = document.createElement('option');
     option.value = `custom:${model.id}`;
-    option.textContent = model.name;
+    const provider = getProviders().find((p) => p.id === model.providerId);
+    option.textContent = provider ? `${provider.name} · ${model.name}` : model.name;
     select.appendChild(option);
   });
   const wanted = prev && models.some((m) => `custom:${m.id}` === prev) ? prev : '';
@@ -2099,19 +2498,19 @@ async function startGeneration() {
   cancelRequested = false;
   setControlsDisabled(true);
   processStartTime = Date.now();
-  progressSamples = [];
-  lastProgressPercent = 0;
-  lastProgressTime = Date.now();
+  const isCinema = currentGenerationMode() === 'cinema';
+  etaEstimator = createEtaEstimator(stats.stageTimesMs || {}, { isCinema });
+  etaEstimator.onEvent({ stage: 'extract', stagePercent: 0 });
   updateGenerateBtn();
   setStatus('processing', 'Processing…');
-  showProgress('Initializing…', 0, 'Starting pipeline');
+  showProgress('Initializing…', 0, 'Starting pipeline', { stage: 'extract', stagePercent: 0 });
   $('#btn-generate').style.display = 'none';
   $('#btn-cancel').style.display = '';
 
   etaInterval = setInterval(updateEta, 1000);
 
   progressCleanup = window.api.onProgress((data) => {
-    showProgress(data.step, data.percent, data.message);
+    showProgress(data.step, data.percent, data.message, data);
   });
 
   try {
@@ -2120,6 +2519,8 @@ async function startGeneration() {
       mode: currentGenerationMode(),
       cinemaSceneCount: Math.max(5, Math.min(20, Number(settings.cinemaSceneCount) || 10)),
       cinemaFillMode: settings.cinemaFillMode === 'blur' ? 'blur' : 'crop',
+      cinemaTargetSec: clampCinemaTarget(settings.cinemaTargetSec),
+      cinemaMaxSec: clampCinemaMax(settings.cinemaMaxSec, clampCinemaTarget(settings.cinemaTargetSec)),
       backgroundFolder: currentGenerationMode() === 'cinema' ? '' : bgFolderPath,
       outputFolder: outputFolderPath,
       subtitlesEnabled: !!settings.subtitlesEnabled,
@@ -2158,8 +2559,11 @@ async function startGeneration() {
 
     if (result.success) {
       const count = result.outputFiles?.length || 0;
+      const elapsed = Date.now() - processStartTime;
+      recordStageHistory(elapsed, result.chunksProduced || result.storiesDetected || count || 0);
+      etaEstimator.complete();
       setStatus('done', 'Complete');
-      showProgress('Done!', 100, `Created ${count} video(s)`);
+      showProgress('Done!', 100, `Created ${count} video(s)`, { stage: 'finalize', stagePercent: 100 });
       stats.totalVideos += count;
       stats.totalRenderTimeMs += renderTimeMs;
       stats.lastRun = new Date().toLocaleString();
@@ -2167,25 +2571,25 @@ async function startGeneration() {
       renderStats();
     } else if (result.cancelled) {
       setStatus('idle', 'Ready');
-      showProgress('Cancelled', 0, 'Generation cancelled');
+      showProgress('Cancelled', 0, 'Generation cancelled', { raw: true });
     } else {
       setStatus('error', 'Error');
-      showProgress('Error', 0, result.error || 'Unknown error');
+      showProgress('Error', 0, result.error || 'Unknown error', { raw: true });
     }
   } catch (err) {
     if (cancelRequested) {
       setStatus('idle', 'Ready');
-      showProgress('Cancelled', 0, 'Generation cancelled');
+      showProgress('Cancelled', 0, 'Generation cancelled', { raw: true });
     } else {
       setStatus('error', 'Error');
-      showProgress('Error', 0, String(err));
+      showProgress('Error', 0, String(err), { raw: true });
     }
   } finally {
     isProcessing = false;
     cancelRequested = false;
     setControlsDisabled(false);
     processStartTime = null;
-    progressSamples = [];
+    etaEstimator = null;
     if (etaInterval) { clearInterval(etaInterval); etaInterval = null; }
     if (progressCleanup) progressCleanup();
     $('#btn-generate').style.display = '';
@@ -2195,20 +2599,43 @@ async function startGeneration() {
   }
 }
 
+// Fold the observed per-stage wall times into the long-term history stored in
+// stats. Render gets an accurate per-chunk figure; length-dependent stages
+// (transcribe/analyze/scenes) are normalized to one minute of source material.
+function recordStageHistory(runTotalMs, chunkCount) {
+  if (!etaEstimator) return;
+  const durations = etaEstimator.collectStageDurations();
+  const sourceMinutes = etaEstimator.getSourceMinutes();
+  const chunks = Math.max(1, chunkCount || etaEstimator.currentChunkCount() || 1);
+  const store = stats.stageTimesMs && typeof stats.stageTimesMs === 'object' ? stats.stageTimesMs : {};
+  for (const stage of STAGE_ORDER) {
+    const d = durations[stage];
+    if (!d || d.ms <= 0) continue;
+    let perChunkMs = 0;
+    if (stage === 'render') {
+      perChunkMs = d.ms / chunks;
+    } else if (stage === 'transcribe' || stage === 'analyze' || stage === 'scenes') {
+      perMinMs = sourceMinutes > 0.2 ? d.ms / sourceMinutes : 0;
+    }
+    EtaHistory.record(store, stage, d.ms, perMinMs, stage === 'render' ? chunks : 0);
+  }
+  stats.stageTimesMs = store;
+}
+
 function cancelGeneration() {
   if (!isProcessing || cancelRequested) return;
   cancelRequested = true;
   window.api.cancelProcessing();
   $('#btn-cancel').disabled = true;
   setStatus('processing', 'Processing…');
-  showProgress('Cancelling…', lastProgressPercent || 0, 'Stopping current work…');
+  showProgress('Cancelling…', etaEstimator ? etaEstimator.getPercent() : 0, 'Stopping current work…', { raw: true });
 }
 
 // ===== UI HELPERS =====
 function setControlsDisabled(disabled) {
   const selectors = [
     '#pick-source', '#pick-background', '#pick-output',
-    '#mode-stories', '#mode-cinema', '#cinema-scene-count', '#cinema-fill-mode',
+    '#mode-stories', '#mode-cinema', '#cinema-scene-count', '#cinema-fill-mode', '#cinema-target-sec', '#cinema-max-sec',
     '#app-language', '#app-theme',
     '#preset-select', '#preset-name-input', '#btn-create-preset', '#btn-save-preset', '#btn-delete-preset',
     '#proxy-toggle',
@@ -2273,38 +2700,21 @@ function setStatus(state, text) {
   $('#status-text').textContent = mapped[text] || text;
 }
 
-function showProgress(step, percent, message) {
+function showProgress(step, percent, message, data = {}) {
   $('#progress-container').style.display = '';
   $('#progress-step').textContent = step;
   $('#progress-message').textContent = message;
+
+  if (etaEstimator && !data.raw) {
+    etaEstimator.onEvent(data);
+    paintProgress();
+    return;
+  }
+
+  // Raw paint (cancel / error): keep the bar where it is.
   $('#progress-fill').style.width = `${percent}%`;
   $('#progress-percent').textContent = `${Math.round(percent)}%`;
-
-  if (percent > 0 && processStartTime) {
-    const now = Date.now();
-    progressSamples.push({ time: now, percent });
-    lastProgressPercent = percent;
-    lastProgressTime = now;
-
-    const WINDOW_MS = 15000;
-    const cutoff = now - WINDOW_MS;
-    while (progressSamples.length > 1 && progressSamples[0].time < cutoff) {
-      progressSamples.shift();
-    }
-
-    if (progressSamples.length >= 2) {
-      const first = progressSamples[0];
-      const last = progressSamples[progressSamples.length - 1];
-      const dp = last.percent - first.percent;
-      const dt = last.time - first.time;
-      if (dp > 0.5 && dt > 1000) {
-        const speed = dp / dt;
-        const remaining = (100 - last.percent) / speed;
-        $('#progress-eta').style.display = '';
-        $('#progress-eta').textContent = `${t('labels.eta.remaining')}: ${formatDuration(remaining)}`;
-      }
-    }
-  }
+  $('#progress-eta').style.display = 'none';
 }
 
 function formatDuration(ms) {
@@ -2319,34 +2729,39 @@ function formatDuration(ms) {
   return `${hr}h ${remMin}m`;
 }
 
-function updateEta() {
-  if (!processStartTime) return;
+function formatSpeed(bps) {
+  if (!bps || bps <= 0) return null;
+  const mbps = bps / 1048576;
+  if (mbps >= 1) return `${mbps.toFixed(1)} MB/s`;
+  return `${Math.max(1, Math.round(bps / 1024))} KB/s`;
+}
 
-  const stalledMs = Date.now() - lastProgressTime;
-  if (stalledMs > 10000 && lastProgressPercent > 0 && lastProgressPercent < 100) {
-    $('#progress-eta').style.display = '';
-    $('#progress-eta').textContent = t('labels.eta.waiting');
+// Paints the estimator state: eased monotonic percent + smoothed ETA + live
+// upload speed. Runs on the 1s interval and can be called directly.
+function paintProgress() {
+  if (!etaEstimator) return;
+  const snap = etaEstimator.tick();
+  $('#progress-fill').style.width = `${snap.percent}%`;
+  $('#progress-percent').textContent = `${Math.floor(snap.percent)}%`;
+
+  const el = $('#progress-eta');
+  if (snap.percent >= 99.9) {
+    el.style.display = 'none';
     return;
   }
-
-  if (progressSamples.length < 2) return;
-
-  const now = Date.now();
-  const WINDOW_MS = 15000;
-  const cutoff = now - WINDOW_MS;
-  while (progressSamples.length > 1 && progressSamples[0].time < cutoff) {
-    progressSamples.shift();
+  if (snap.stalled || snap.etaMs == null) {
+    el.style.display = '';
+    el.textContent = t('labels.eta.waiting');
+    return;
   }
+  const speedText = formatSpeed(snap.speedBps);
+  el.style.display = '';
+  el.textContent = `${t('labels.eta.remaining')}: ${formatDuration(snap.etaMs)}${speedText ? ` · ↑ ${speedText}` : ''}`;
+}
 
-  const first = progressSamples[0];
-  const last = progressSamples[progressSamples.length - 1];
-  const dp = last.percent - first.percent;
-  const dt = last.time - first.time;
-  if (dp > 0.5 && dt > 1000) {
-    const speed = dp / dt;
-    const remaining = (100 - last.percent) / speed;
-    $('#progress-eta').textContent = `${t('labels.eta.remaining')}: ${formatDuration(remaining)}`;
-  }
+function updateEta() {
+  if (!processStartTime || !etaEstimator) return;
+  paintProgress();
 }
 
 function hideProgress() {
@@ -2539,7 +2954,7 @@ function renderStats() {
 }
 
 async function resetStats() {
-  stats = { totalVideos: 0, totalRenderTimeMs: 0, lastRun: null };
+  stats = { totalVideos: 0, totalRenderTimeMs: 0, lastRun: null, stageTimesMs: {} };
   await saveStats();
   renderStats();
 }

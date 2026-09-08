@@ -227,7 +227,7 @@ function buildProxyAgent(proxy) {
 // ---------------------------------------------------------------------------
 // Groq API request helper
 // ---------------------------------------------------------------------------
-async function groqRequest(apiKey, audioPath, model, language, proxy, signal, baseUrl = '') {
+async function groqRequest(apiKey, audioPath, model, language, proxy, signal, baseUrl = '', onUpload = null) {
   throwIfAborted(signal);
   const FormData = require('form-data');
   const { normalizeBaseUrl, GROQ_TRANSCRIPTION_BASE } = require('./model-registry');
@@ -270,6 +270,28 @@ async function groqRequest(apiKey, audioPath, model, language, proxy, signal, ba
     validateStatus: () => true,
     signal
   };
+
+  // Short internet-speed samples: axios fires onUploadProgress as bytes are
+  // handed to the socket; we throttle to ~300ms and compute a bps sample per
+  // interval. The renderer EMA-smooths these for the ETA and the speed readout.
+  if (typeof onUpload === 'function') {
+    let lastEmit = 0;
+    let lastLoaded = 0;
+    let lastTs = 0;
+    config.onUploadProgress = (e) => {
+      const loaded = Math.max(0, Number(e?.loaded) || 0);
+      const total = Math.max(1, Number(e?.total) || contentLength);
+      const now = Date.now();
+      const finished = total > 0 && loaded >= total;
+      if (!finished && now - lastEmit < 300) return;
+      const dtMs = lastTs ? now - lastTs : 0;
+      const bps = dtMs > 150 ? ((loaded - lastLoaded) / dtMs) * 1000 : 0;
+      lastEmit = now;
+      lastLoaded = loaded;
+      lastTs = now;
+      try { onUpload({ loaded, total, bps, ts: now }); } catch {}
+    };
+  }
 
   const agent = buildProxyAgent(proxy);
   if (agent) {
@@ -425,7 +447,7 @@ async function groqRequestWithRetry(apiKeys, audioPath, model, language, proxy, 
     const selectedKey = await waitForGroqTranscriptionKey(apiKeys, onProgress, signal);
 
     try {
-      return await groqRequest(selectedKey.apiKey, audioPath, model, language, proxy, signal, baseUrl);
+      return await groqRequest(selectedKey.apiKey, audioPath, model, language, proxy, signal, baseUrl, opts.onUpload);
     } catch (err) {
       lastErr = err;
       if (isAbortError(err)) throw err;
@@ -667,7 +689,7 @@ class WhisperService {
     }));
   }
 
-  async _transcribeChunked(audioPath, language, proxy, onProgress, signal, modelChain) {
+  async _transcribeChunked(audioPath, language, proxy, onProgress, signal, modelChain, onUpload = null) {
     throwIfAborted(signal);
     const fileSize = fs.statSync(audioPath).size;
     const totalDuration = await this._getAudioDuration(audioPath, signal);
@@ -687,7 +709,7 @@ class WhisperService {
       for (let i = 0; i < chunks.length; i++) {
         throwIfAborted(signal);
         const chunk = chunks[i];
-        onProgress?.(`Transcribing chunk ${i + 1}/${chunks.length}…`);
+        onProgress?.(`Transcribing chunk ${i + 1}/${chunks.length}…`, { chunkIndex: i + 1, chunkCount: chunks.length });
         try {
           const result = await this._requestWithChain(
             chunk.path,
@@ -697,7 +719,8 @@ class WhisperService {
             signal,
             3,
             modelChain,
-            chainCursor
+            chainCursor,
+            { onUpload }
           );
           const parsed = this._parseVerboseResult(result);
           fullSegments.push(...this._shiftSegments(parsed, chunk.offsetSec));
@@ -749,16 +772,16 @@ class WhisperService {
     let segments;
 
     if (fileSize > MAX_DIRECT_UPLOAD_BYTES) {
-      segments = await this._transcribeChunked(audioPath, language, proxy, onProgress, signal, modelChain);
+      segments = await this._transcribeChunked(audioPath, language, proxy, onProgress, signal, modelChain, opts.onUpload);
     } else {
       try {
-        const result = await this._requestWithChain(audioPath, language, proxy, onProgress, signal, 3, modelChain);
+        const result = await this._requestWithChain(audioPath, language, proxy, onProgress, signal, 3, modelChain, { index: 0 }, { onUpload: opts.onUpload });
         segments = this._parseVerboseResult(result);
       } catch (err) {
         if (isAbortError(err)) throw err;
         if (!isPayloadTooLargeError(err)) throw err;
         onProgress?.('The provider rejected the full upload with 413. Retrying with chunking…');
-        segments = await this._transcribeChunked(audioPath, language, proxy, onProgress, signal, modelChain);
+        segments = await this._transcribeChunked(audioPath, language, proxy, onProgress, signal, modelChain, opts.onUpload);
       }
     }
 
@@ -770,7 +793,7 @@ class WhisperService {
    * Run one request against the model chain. Advances the sticky chain
    * cursor on rate limits and unavailable models/keys (401/403/404).
    */
-  async _requestWithChain(audioPath, language, proxy, onProgress, signal, maxRetries, modelChain, cursor = { index: 0 }) {
+  async _requestWithChain(audioPath, language, proxy, onProgress, signal, maxRetries, modelChain, cursor = { index: 0 }, opts = {}) {
     for (; cursor.index < modelChain.length; cursor.index++) {
       const entry = modelChain[cursor.index];
       const hasNext = cursor.index < modelChain.length - 1;
@@ -786,7 +809,7 @@ class WhisperService {
           signal,
           maxRetries,
           entry.baseUrl,
-          { chainHasNext: hasNext }
+          { chainHasNext: hasNext, onUpload: opts.onUpload }
         );
       } catch (err) {
         if (isAbortError(err) || isPayloadTooLargeError(err)) throw err;
