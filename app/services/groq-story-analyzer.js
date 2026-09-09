@@ -466,19 +466,37 @@ class GroqStoryAnalyzer {
     ].join('\n');
   }
 
-  _buildScenePrompt(window, totalDuration, sceneQuota) {
+  _buildScenePrompt(window, totalDuration, sceneQuota, lengthConfig = null) {
     const transcriptText = window.blocks.map((block) => this._formatBlockLine(block)).join('');
     const coreStartId = window.blocks[window.coreStart - window.windowStart]?.id || window.blocks[0]?.id || 1;
     const coreEndId = window.blocks[window.coreEnd - window.windowStart]?.id || window.blocks[window.blocks.length - 1]?.id || coreStartId;
 
-    return [
+    const lines = [
       `The whole movie needs only its best scenes; this transcript part is one of several — emit at most ${sceneQuota} scene(s) whose START is inside core block ids ${String(coreStartId).padStart(3, '0')}..${String(coreEndId).padStart(3, '0')}.`,
       '- if no strong scene starts in the core range, return {"scenes":[]}',
       '- blocks outside the core range are overlap context only — use them to judge boundaries, never as boundaries',
-      `- movie duration ${totalDuration.toFixed(2)} sec`,
-      'Blocks:',
-      transcriptText
-    ].join('\n');
+      `- movie duration ${totalDuration.toFixed(2)} sec`
+    ];
+
+    // Soft length guidance lives in the user message (the system contract
+    // stays duration-agnostic): the AI treats it as a preference, never as
+    // a reason to drop a strong scene.
+    if (lengthConfig && Number.isFinite(lengthConfig.targetSec)) {
+      const guidance = [
+        `LENGTH GUIDANCE: aim for scenes of roughly ${Math.round(lengthConfig.targetSec)} seconds`
+      ];
+      if (Number.isFinite(lengthConfig.minSec) && lengthConfig.minSec > 0) {
+        guidance.push(`do not select scenes shorter than ${Math.round(lengthConfig.minSec)} seconds`);
+      }
+      if (lengthConfig.maxSec !== null && Number.isFinite(lengthConfig.maxSec)) {
+        guidance.push(`prefer scenes no longer than ${Math.round(lengthConfig.maxSec)} seconds`);
+      }
+      guidance.push('Judge emotional impact first — never drop or truncate a strong scene just because of its length.');
+      lines.push(`- ${guidance.join('; ')}`);
+    }
+
+    lines.push('Blocks:', transcriptText);
+    return lines.join('\n');
   }
 
   async _requestWindow(apiKey, prompt, reasoningEffort = 'default', signal, requestOptions = {}) {
@@ -697,9 +715,9 @@ class GroqStoryAnalyzer {
     }
   }
 
-  async _analyzeSceneWindow(window, totalDuration, sceneQuota, onProgress, label, signal) {
+  async _analyzeSceneWindow(window, totalDuration, sceneQuota, onProgress, label, signal, lengthConfig = null) {
     throwIfAborted(signal);
-    const prompt = this._buildScenePrompt(window, totalDuration, sceneQuota);
+    const prompt = this._buildScenePrompt(window, totalDuration, sceneQuota, lengthConfig);
     try {
       const parsed = await this._requestWindowWithRetry(prompt, onProgress, label, signal);
       return this._sanitizeWindowScenes(parsed.scenes, window, totalDuration);
@@ -712,8 +730,8 @@ class GroqStoryAnalyzer {
       }
 
       onProgress?.(`${label}: request too large for Qwen, splitting into smaller windows…`);
-      const leftScenes = await this._analyzeSceneWindow(split[0], totalDuration, sceneQuota, onProgress, `${label}.A`, signal);
-      const rightScenes = await this._analyzeSceneWindow(split[1], totalDuration, sceneQuota, onProgress, `${label}.B`, signal);
+      const leftScenes = await this._analyzeSceneWindow(split[0], totalDuration, sceneQuota, onProgress, `${label}.A`, signal, lengthConfig);
+      const rightScenes = await this._analyzeSceneWindow(split[1], totalDuration, sceneQuota, onProgress, `${label}.B`, signal, lengthConfig);
       return [...leftScenes, ...rightScenes];
     }
   }
@@ -994,6 +1012,7 @@ class GroqStoryAnalyzer {
     }
 
     const requested = Math.max(1, Math.min(50, Number(sceneCount) || 10));
+    const lengthConfig = options.lengthConfig || null;
     const blocks = this.buildTranscriptBlocks(transcriptSegments);
     if (!blocks.length) {
       throw new Error('Transcript is empty. Whisper returned no usable text.');
@@ -1014,7 +1033,7 @@ class GroqStoryAnalyzer {
       const window = windows[i];
       const label = `Scene window ${i + 1}/${windows.length}`;
       onProgress?.(`${label}: searching for the strongest scenes…`);
-      const cleaned = await this._analyzeSceneWindow(window, totalDuration, perWindowQuota, onProgress, label, signal);
+      const cleaned = await this._analyzeSceneWindow(window, totalDuration, perWindowQuota, onProgress, label, signal, lengthConfig);
       onProgress?.(`${label}: found ${cleaned.length} scene(s).`);
       rawScenes.push(...cleaned);
     }

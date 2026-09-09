@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildStoryChunks, fillTimelineGaps } = require('../app/services/story-chunker');
+const { buildStoryChunks, buildChunkProfile, fillTimelineGaps } = require('../app/services/story-chunker');
 
 test('short neighbouring stories are combined until the clip reaches 90 seconds', () => {
   const chunks = buildStoryChunks([
@@ -51,12 +51,49 @@ test('long stories split only on transcript segment boundaries', () => {
     segments.push({ start, end: start + 30, text: `Завершённая мысль ${start}.` });
   }
 
+  // Default hardMax is 390: a 420s story must split into two parts inside the
+  // target range, cutting only at segment ends.
   const chunks = buildStoryChunks([{ title: 'Длинная', start: 0, end: 420 }], segments);
 
   assert.equal(chunks.length, 2);
   assert.equal(chunks[0].end, 210);
   assert.equal(chunks[1].start, 210);
-  assert.ok(chunks.every((chunk) => chunk.end - chunk.start <= 300));
+  assert.ok(chunks.every((chunk) => chunk.end - chunk.start <= 390));
+});
+
+test('custom profile: hardMax lower than the default splits more aggressively', () => {
+  const segments = [];
+  for (let start = 0; start < 420; start += 30) {
+    segments.push({ start, end: start + 30, text: `Завершённая мысль ${start}.` });
+  }
+
+  const chunks = buildStoryChunks(
+    [{ title: 'Длинная', start: 0, end: 420 }],
+    segments,
+    buildChunkProfile({ targetMinSec: 60, targetMaxSec: 150, hardMinSec: 30, hardMaxSec: 180 })
+  );
+
+  assert.ok(chunks.length >= 2);
+  assert.ok(chunks.every((chunk) => chunk.end - chunk.start <= 180));
+});
+
+test('buildChunkProfile keeps the chain hardMin <= targetMin <= targetMax <= hardMax', () => {
+  const profile = buildChunkProfile({ targetMinSec: 500, targetMaxSec: 100, hardMinSec: 700, hardMaxSec: 50 });
+  assert.ok(profile.hardMinSec <= profile.targetMinSec);
+  assert.ok(profile.targetMinSec <= profile.targetMaxSec);
+  assert.ok(profile.targetMaxSec <= profile.hardMaxSec);
+});
+
+test('custom profile: hardMin forces merging even past the target range', () => {
+  // hardMin=200: the 60s clip MUST merge into the neighbour even though the
+  // combined 210s clip exceeds targetMax=180.
+  const chunks = buildStoryChunks([
+    { title: 'Основная', start: 0, end: 150 },
+    { title: 'Осколок', start: 152, end: 212 }
+  ], [], buildChunkProfile({ targetMinSec: 90, targetMaxSec: 180, hardMinSec: 200, hardMaxSec: 300 }));
+
+  assert.equal(chunks.length, 1);
+  assert.deepEqual([chunks[0].start, chunks[0].end], [0, 212]);
 });
 
 test('long story stays intact when there is no safe transcript boundary', () => {

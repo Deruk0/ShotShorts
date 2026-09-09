@@ -349,6 +349,12 @@ const DEFAULT_SETTINGS = {
   cinemaFillMode: 'crop',
   cinemaTargetSec: 45,
   cinemaMaxSec: 90,
+  cinemaMinSec: 20,
+  cinemaMaxSecEnabled: true,
+  storiesTargetMinSec: 90,
+  storiesTargetMaxSec: 300,
+  storiesHardMinSec: 60,
+  storiesHardMaxSec: 390,
   subtitlesEnabled: false,
   subtitleStyle: 'Classic',
   subtitleLanguage: 'ru',
@@ -392,6 +398,12 @@ const PRESET_SETTING_KEYS = [
   'cinemaFillMode',
   'cinemaTargetSec',
   'cinemaMaxSec',
+  'cinemaMinSec',
+  'cinemaMaxSecEnabled',
+  'storiesTargetMinSec',
+  'storiesTargetMaxSec',
+  'storiesHardMinSec',
+  'storiesHardMaxSec',
   'subtitlesEnabled',
   'subtitleStyle',
   'subtitleLanguage',
@@ -523,6 +535,16 @@ const I18N = {
       cinemaSettingsHint: 'These options apply when the Generator is switched to Cinema mode.',
       cinemaTargetLabel: 'Target Length (sec)',
       cinemaMaxLabel: 'Max Length (sec)',
+      cinemaMinLabel: 'Min Length (sec)',
+      cinemaMaxEnabledLabel: 'Limit max scene length',
+      cinemaLengthHint: 'Length values guide the AI when it picks scenes; strong scenes are never cut or dropped because of their length.',
+      storiesSectionTitle: 'Stories Mode',
+      storiesSettingsHint: 'These options apply when the Generator is switched to Stories mode.',
+      storiesTargetMinLabel: 'Target Min Length (sec)',
+      storiesTargetMaxLabel: 'Target Max Length (sec)',
+      storiesHardMinLabel: 'Hard Min Length (sec)',
+      storiesHardMaxLabel: 'Hard Max Length (sec)',
+      storiesLengthHint: 'Shorter stories merge, longer ones split. Hard bounds force the extremes; the target range is what the merger aims for.',
       sourceTitle: 'Source Audio / Video',
       bgTitle: 'Background Videos Folder',
       outputTitle: 'Output Folder',
@@ -655,6 +677,16 @@ const I18N = {
       cinemaSettingsHint: 'Эти настройки применяются, когда в Генераторе включён режим «Кино».',
       cinemaTargetLabel: 'Целевая длина (сек)',
       cinemaMaxLabel: 'Макс. длина (сек)',
+      cinemaMinLabel: 'Мин. длина (сек)',
+      cinemaMaxEnabledLabel: 'Ограничивать макс. длину сцены',
+      cinemaLengthHint: 'Значения длины — подсказка для ИИ при отборе сцен; сильные сцены никогда не режутся и не отбрасываются из-за длины.',
+      storiesSectionTitle: 'Режим историй',
+      storiesSettingsHint: 'Эти настройки применяются, когда в Генераторе включён режим «Истории».',
+      storiesTargetMinLabel: 'Целевой мин. (сек)',
+      storiesTargetMaxLabel: 'Целевой макс. (сек)',
+      storiesHardMinLabel: 'Жёсткий мин. (сек)',
+      storiesHardMaxLabel: 'Жёсткий макс. (сек)',
+      storiesLengthHint: 'Короткие истории объединяются, длинные режутся. Жёсткие границы форсируют крайние случаи; целевой диапазон — то, куда стремится сборка клипов.',
       sourceTitle: 'Исходное аудио / видео',
       bgTitle: 'Папка с фоновыми видео',
       outputTitle: 'Папка для вывода',
@@ -796,6 +828,16 @@ function applyTranslations() {
   const cinemaHint = $('#cinema-settings-hint'); if (cinemaHint) cinemaHint.textContent = t('labels.cinemaSettingsHint');
   const cinemaTargetLabel = $('#txt-cinema-target-label'); if (cinemaTargetLabel) cinemaTargetLabel.textContent = t('labels.cinemaTargetLabel');
   const cinemaMaxLabel = $('#txt-cinema-max-label'); if (cinemaMaxLabel) cinemaMaxLabel.textContent = t('labels.cinemaMaxLabel');
+  const cinemaMinLabel = $('#txt-cinema-min-label'); if (cinemaMinLabel) cinemaMinLabel.textContent = t('labels.cinemaMinLabel');
+  const cinemaMaxEnabledLabel = $('#txt-cinema-max-enabled-label'); if (cinemaMaxEnabledLabel) cinemaMaxEnabledLabel.textContent = t('labels.cinemaMaxEnabledLabel');
+  const cinemaLengthHint = $('#cinema-length-hint'); if (cinemaLengthHint) cinemaLengthHint.textContent = t('labels.cinemaLengthHint');
+  const storiesSectionTitle = $('#txt-stories-title'); if (storiesSectionTitle) storiesSectionTitle.textContent = t('labels.storiesSectionTitle');
+  const storiesSettingsHint = $('#stories-settings-hint'); if (storiesSettingsHint) storiesSettingsHint.textContent = t('labels.storiesSettingsHint');
+  const storiesTargetMinLabel = $('#txt-stories-target-min-label'); if (storiesTargetMinLabel) storiesTargetMinLabel.textContent = t('labels.storiesTargetMinLabel');
+  const storiesTargetMaxLabel = $('#txt-stories-target-max-label'); if (storiesTargetMaxLabel) storiesTargetMaxLabel.textContent = t('labels.storiesTargetMaxLabel');
+  const storiesHardMinLabel = $('#txt-stories-hard-min-label'); if (storiesHardMinLabel) storiesHardMinLabel.textContent = t('labels.storiesHardMinLabel');
+  const storiesHardMaxLabel = $('#txt-stories-hard-max-label'); if (storiesHardMaxLabel) storiesHardMaxLabel.textContent = t('labels.storiesHardMaxLabel');
+  const storiesLengthHint = $('#stories-length-hint'); if (storiesLengthHint) storiesLengthHint.textContent = t('labels.storiesLengthHint');
   const cinemaScenesLabel = $('#txt-cinema-scenes-label'); if (cinemaScenesLabel) cinemaScenesLabel.textContent = t('labels.cinemaScenesLabel');
   const cinemaFillLabel = $('#txt-cinema-fill-label'); if (cinemaFillLabel) cinemaFillLabel.textContent = t('labels.cinemaFillLabel');
   const cinemaFillSelect = $('#cinema-fill-mode');
@@ -975,6 +1017,25 @@ function syncSettingsFromControls() {
       settings.cinemaTargetSec = target;
       settings.cinemaMaxSec = clampCinemaMax($('#cinema-max-sec')?.value, target);
     }
+    if ($('#cinema-min-sec')) {
+      settings.cinemaMinSec = clampCinemaMin($('#cinema-min-sec').value);
+      settings.cinemaMaxSecEnabled = $('#cinema-max-enabled')?.checked !== false;
+    }
+    if ($('#stories-target-min-sec')) {
+      Object.assign(settings, {
+        storiesHardMinSec: clampStoriesSec($('#stories-hard-min-sec').value, settings.storiesHardMinSec),
+        storiesTargetMinSec: clampStoriesSec($('#stories-target-min-sec').value, settings.storiesTargetMinSec),
+        storiesTargetMaxSec: clampStoriesSec($('#stories-target-max-sec').value, settings.storiesTargetMaxSec),
+        storiesHardMaxSec: clampStoriesSec($('#stories-hard-max-sec').value, settings.storiesHardMaxSec)
+      });
+      const normalized = normalizeStoriesLength(settings);
+      Object.assign(settings, {
+        storiesHardMinSec: normalized.hardMin,
+        storiesTargetMinSec: normalized.targetMin,
+        storiesTargetMaxSec: normalized.targetMax,
+        storiesHardMaxSec: normalized.hardMax
+      });
+    }
   }
 
   if ($('#proxy-toggle')) {
@@ -1077,8 +1138,25 @@ function syncSettingsToControls() {
   $('#cinema-scene-count').value = String(Math.max(5, Math.min(20, Number(settings.cinemaSceneCount) || 10)));
   $('#cinema-scene-count-value').textContent = String(Math.max(5, Math.min(20, Number(settings.cinemaSceneCount) || 10)));
   $('#cinema-fill-mode').value = settings.cinemaFillMode === 'blur' ? 'blur' : 'crop';
-  $('#cinema-target-sec').value = String(clampCinemaTarget(settings.cinemaTargetSec));
-  $('#cinema-max-sec').value = String(clampCinemaMax(settings.cinemaMaxSec, clampCinemaTarget(settings.cinemaTargetSec)));
+  const cinemaTarget = clampCinemaTarget(settings.cinemaTargetSec);
+  $('#cinema-target-sec').value = String(cinemaTarget);
+  $('#cinema-max-sec').value = String(clampCinemaMax(settings.cinemaMaxSec, cinemaTarget));
+  $('#cinema-min-sec').value = String(clampCinemaMin(settings.cinemaMinSec));
+  settings.cinemaMaxSecEnabled = settings.cinemaMaxSecEnabled !== false;
+  $('#cinema-max-enabled').checked = settings.cinemaMaxSecEnabled;
+  $('#cinema-max-sec').disabled = !settings.cinemaMaxSecEnabled;
+  $('#cinema-max-field').style.opacity = settings.cinemaMaxSecEnabled ? '1' : '0.4';
+  const normalizedStories = normalizeStoriesLength(settings);
+  Object.assign(settings, {
+    storiesHardMinSec: normalizedStories.hardMin,
+    storiesTargetMinSec: normalizedStories.targetMin,
+    storiesTargetMaxSec: normalizedStories.targetMax,
+    storiesHardMaxSec: normalizedStories.hardMax
+  });
+  $('#stories-hard-min-sec').value = String(normalizedStories.hardMin);
+  $('#stories-target-min-sec').value = String(normalizedStories.targetMin);
+  $('#stories-target-max-sec').value = String(normalizedStories.targetMax);
+  $('#stories-hard-max-sec').value = String(normalizedStories.hardMax);
   applyGenerationModeUi();
   $('#subtitle-style').value = settings.subtitleStyle || 'Classic';
   $('#subtitle-language').value = settings.subtitleLanguage || 'ru';
@@ -1337,6 +1415,16 @@ function applyGenerationModeUi() {
   // footage goes into the output clips.
   const sceneCountField = $('#cinema-scene-count-field');
   if (sceneCountField) sceneCountField.style.display = isCinema ? '' : 'none';
+  // Background videos are a stories-only setting: cinema mode renders the
+  // movie's own frames, so the picker is irrelevant there.
+  const bgSection = $('#bg-section');
+  if (bgSection) bgSection.style.display = isCinema ? 'none' : '';
+  // Each mode's settings section is visible only when that mode is active —
+  // no duplicated length controls from the other mode.
+  const storiesSection = $('#stories-length-section');
+  if (storiesSection) storiesSection.style.display = isCinema ? 'none' : '';
+  const cinemaSection = $('#cinema-length-section');
+  if (cinemaSection) cinemaSection.style.display = isCinema ? '' : 'none';
   syncActivePresetIdAlias();
   renderPresets();
   updateGenerateBtn();
@@ -1374,19 +1462,49 @@ function clampCinemaTarget(value) {
   return Math.max(10, Math.min(300, Math.round(n)));
 }
 
+function clampCinemaMin(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 20;
+  return Math.max(5, Math.min(300, Math.round(n)));
+}
+
 function clampCinemaMax(value, targetSec) {
   const n = Number(value);
   if (!Number.isFinite(n)) return 90;
-  return Math.max(targetSec, Math.max(15, Math.min(600, Math.round(n))));
+  const clamped = Math.max(15, Math.min(600, Math.round(n)));
+  // When the max limit is disabled the stored value stays free of the
+  // target floor; it is only used when the user re-enables the limit.
+  return Math.max(clamped, targetSec || 0);
+}
+
+function clampStoriesSec(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(15, Math.min(1800, Math.round(n)));
+}
+
+function normalizeStoriesLength(settings) {
+  const next = {
+    hardMin: clampStoriesSec(settings.storiesHardMinSec, 60),
+    targetMin: clampStoriesSec(settings.storiesTargetMinSec, 90),
+    targetMax: clampStoriesSec(settings.storiesTargetMaxSec, 300),
+    hardMax: clampStoriesSec(settings.storiesHardMaxSec, 390)
+  };
+  // hardMin <= targetMin <= targetMax <= hardMax
+  next.hardMax = Math.max(next.targetMax, next.hardMax);
+  next.targetMax = Math.max(next.targetMin, next.targetMax);
+  next.targetMin = Math.max(next.hardMin, next.targetMin);
+  next.hardMin = Math.min(next.targetMin, next.hardMin);
+  return next;
 }
 
 $('#cinema-target-sec').addEventListener('change', () => {
   const target = clampCinemaTarget($('#cinema-target-sec').value);
   $('#cinema-target-sec').value = String(target);
   settings.cinemaTargetSec = target;
-  // Max can never be smaller than target — sync it when needed.
-  if (clampCinemaMax($('#cinema-max-sec').value, target) < target || Number($('#cinema-max-sec').value) < target) {
-    const max = clampCinemaMax($('#cinema-max-sec').value, target);
+  // Max can never be smaller than target while the limit is enabled — sync it when needed.
+  const max = clampCinemaMax($('#cinema-max-sec').value, target);
+  if ($('#cinema-max-sec').value !== String(max)) {
     $('#cinema-max-sec').value = String(max);
     settings.cinemaMaxSec = max;
   }
@@ -1399,6 +1517,52 @@ $('#cinema-max-sec').addEventListener('change', () => {
   $('#cinema-max-sec').value = String(max);
   settings.cinemaMaxSec = max;
   saveSettings();
+});
+
+$('#cinema-min-sec').addEventListener('change', () => {
+  const min = clampCinemaMin($('#cinema-min-sec').value);
+  $('#cinema-min-sec').value = String(min);
+  settings.cinemaMinSec = min;
+  saveSettings();
+});
+
+$('#cinema-max-enabled').addEventListener('change', () => {
+  const enabled = !!$('#cinema-max-enabled').checked;
+  settings.cinemaMaxSecEnabled = enabled;
+  $('#cinema-max-sec').disabled = !enabled;
+  $('#cinema-max-field').style.opacity = enabled ? '1' : '0.4';
+  if (enabled) {
+    const target = clampCinemaTarget($('#cinema-target-sec').value);
+    const max = clampCinemaMax($('#cinema-max-sec').value, target);
+    $('#cinema-max-sec').value = String(max);
+    settings.cinemaMaxSec = max;
+  }
+  saveSettings();
+});
+
+const STORIES_LENGTH_FIELDS = [
+  { input: '#stories-hard-min-sec', key: 'hardMin' },
+  { input: '#stories-target-min-sec', key: 'targetMin' },
+  { input: '#stories-target-max-sec', key: 'targetMax' },
+  { input: '#stories-hard-max-sec', key: 'hardMax' }
+];
+
+STORIES_LENGTH_FIELDS.forEach(({ input, key }) => {
+  $(input).addEventListener('change', () => {
+    settings[key] = clampStoriesSec($(input).value, settings[key]);
+    const normalized = normalizeStoriesLength(settings);
+    Object.assign(settings, {
+      storiesHardMinSec: normalized.hardMin,
+      storiesTargetMinSec: normalized.targetMin,
+      storiesTargetMaxSec: normalized.targetMax,
+      storiesHardMaxSec: normalized.hardMax
+    });
+    $('#stories-hard-min-sec').value = String(normalized.hardMin);
+    $('#stories-target-min-sec').value = String(normalized.targetMin);
+    $('#stories-target-max-sec').value = String(normalized.targetMax);
+    $('#stories-hard-max-sec').value = String(normalized.hardMax);
+    saveSettings();
+  });
 });
 
 // ===== SETTINGS: PRESETS =====
@@ -2521,6 +2685,12 @@ async function startGeneration() {
       cinemaFillMode: settings.cinemaFillMode === 'blur' ? 'blur' : 'crop',
       cinemaTargetSec: clampCinemaTarget(settings.cinemaTargetSec),
       cinemaMaxSec: clampCinemaMax(settings.cinemaMaxSec, clampCinemaTarget(settings.cinemaTargetSec)),
+      cinemaMinSec: clampCinemaMin(settings.cinemaMinSec),
+      cinemaMaxSecEnabled: settings.cinemaMaxSecEnabled !== false,
+      storiesTargetMinSec: clampStoriesSec(settings.storiesTargetMinSec, 90),
+      storiesTargetMaxSec: clampStoriesSec(settings.storiesTargetMaxSec, 300),
+      storiesHardMinSec: clampStoriesSec(settings.storiesHardMinSec, 60),
+      storiesHardMaxSec: clampStoriesSec(settings.storiesHardMaxSec, 390),
       backgroundFolder: currentGenerationMode() === 'cinema' ? '' : bgFolderPath,
       outputFolder: outputFolderPath,
       subtitlesEnabled: !!settings.subtitlesEnabled,

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { GroqStoryAnalyzer, SYSTEM_FIND_STORIES, SYSTEM_REFINE_BOUNDARIES } = require('../app/services/groq-story-analyzer');
+const { GroqStoryAnalyzer, SYSTEM_FIND_STORIES, SYSTEM_REFINE_BOUNDARIES, SYSTEM_FIND_SCENES } = require('../app/services/groq-story-analyzer');
 
 class FakeStoryAnalyzer extends GroqStoryAnalyzer {
   constructor(responses) {
@@ -165,7 +165,32 @@ test('system prompts carry the contract and stay free of duration hints', () => 
   assert.match(SYSTEM_FIND_STORIES, /start_block_id/);
   assert.match(SYSTEM_REFINE_BOUNDARIES, /CHECKLIST/);
   assert.match(SYSTEM_REFINE_BOUNDARIES, /complete=false/);
-  // Duration is owned by the chunker, not the model.
+  // Duration is owned by the chunker (stories) or the user-message guidance
+  // (cinema), never by the static system contracts.
   assert.equal(SYSTEM_FIND_STORIES.includes('2:30'), false);
   assert.equal(SYSTEM_FIND_STORIES.includes('target'), false);
+  assert.equal(SYSTEM_FIND_SCENES.includes('LENGTH GUIDANCE'), false);
+});
+
+test('cinema scene prompt carries the length guidance from user settings', () => {
+  const analyzer = new GroqStoryAnalyzer(['test-key']);
+  const blocks = [
+    { id: 1, start: 0, end: 10, text: 'Диалог.' },
+    { id: 2, start: 10, end: 20, text: 'Продолжение.' }
+  ];
+  const window = { coreStart: 0, coreEnd: 1, windowStart: 0, windowEnd: 1, blocks };
+
+  const guided = analyzer._buildScenePrompt(window, 120, 3, { targetSec: 45, minSec: 20, maxSec: 90 });
+  assert.match(guided, /LENGTH GUIDANCE: aim for scenes of roughly 45 seconds/);
+  assert.match(guided, /do not select scenes shorter than 20 seconds/);
+  assert.match(guided, /prefer scenes no longer than 90 seconds/);
+  assert.match(guided, /never drop or truncate a strong scene just because of its length/);
+
+  const unlimited = analyzer._buildScenePrompt(window, 120, 3, { targetSec: 45, minSec: 20, maxSec: null });
+  assert.match(unlimited, /roughly 45 seconds/);
+  assert.match(unlimited, /shorter than 20 seconds/);
+  assert.doesNotMatch(unlimited, /no longer than/);
+
+  const unguided = analyzer._buildScenePrompt(window, 120, 3, null);
+  assert.doesNotMatch(unguided, /LENGTH GUIDANCE/);
 });

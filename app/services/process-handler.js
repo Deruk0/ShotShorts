@@ -10,11 +10,12 @@ const { FontManager } = require('./font-manager');
 const { getProxy } = require('./store');
 const { isAbortError, runFfmpegCommand, throwIfAborted } = require('./cancellation');
 const { alignStoriesToTranscript } = require('./story-padding');
-const { buildStoryChunks, fillTimelineGaps } = require('./story-chunker');
+const { buildStoryChunks, buildChunkProfile, fillTimelineGaps } = require('./story-chunker');
 const {
   buildActionScenes,
   analyzeMovieEnergy,
   buildCinemaChunkProfile,
+  normalizeCinemaLengthConfig,
   normalizeCinemaSceneCount,
   normalizeActionScenes,
   buildCinemaSceneList,
@@ -117,7 +118,10 @@ async function runCinemaPipeline(ctx) {
 
   const sceneCount = normalizeCinemaSceneCount(config.cinemaSceneCount);
   const fillMode = config.cinemaFillMode === 'blur' ? 'blur' : 'crop';
-  const chunkProfile = buildCinemaChunkProfile(config);
+  // Cinema scenes are never cut or merged by the pipeline: length is owned
+  // by the AI, guided through the prompt via the normalized settings.
+  const chunkProfile = buildCinemaChunkProfile();
+  const lengthConfig = normalizeCinemaLengthConfig(config);
 
   send({ step: 'Cinema Mode', percent: 30, stage: 'scenes', stagePercent: null, message: `Selecting the top ${sceneCount} scenes…` });
 
@@ -133,7 +137,7 @@ async function runCinemaPipeline(ctx) {
         sourceAudioDuration,
         sceneCount,
         (msg) => send({ step: 'Analyzing Scenes', percent: 34, stage: 'scenes', stagePercent: null, message: msg }),
-        { signal }
+        { signal, lengthConfig }
       );
       throwIfAborted(signal);
       llmScenes = alignStoriesToTranscript(analysis.scenes, transcriptSegments, sourceAudioDuration)
@@ -482,13 +486,22 @@ function register() {
         durations: {}
       };
 
-      const storyChunks = buildStoryChunks(normalizedStories, transcriptSegments);
+      // Clip-length profile from user settings: soft target range drives
+      // merging/splitting, hard bounds force the extreme cases. Gap-fill
+      // clips reuse the same profile.
+      const storiesProfile = buildChunkProfile({
+        targetMinSec: Number(config.storiesTargetMinSec) || undefined,
+        targetMaxSec: Number(config.storiesTargetMaxSec) || undefined,
+        hardMinSec: Number(config.storiesHardMinSec) || undefined,
+        hardMaxSec: Number(config.storiesHardMaxSec) || undefined
+      });
+      const storyChunks = buildStoryChunks(normalizedStories, transcriptSegments, storiesProfile);
       // Stories mode covers the WHOLE footage: the gaps between final clips
       // (intro, outros, unrelated talk) become standalone fill clips so
       // nothing from the source is lost. Gaps are computed AFTER chunking —
       // merged story clips change the boundaries.
       const gapSpans = fillTimelineGaps(storyChunks, sourceAudioDuration, { minGapSec: 30 });
-      const gapChunks = buildStoryChunks(gapSpans, transcriptSegments);
+      const gapChunks = buildStoryChunks(gapSpans, transcriptSegments, storiesProfile);
       const chunks = [...storyChunks, ...gapChunks]
         .sort((a, b) => a.start - b.start)
         .map((chunk, index) => ({ ...chunk, index: index + 1 }));

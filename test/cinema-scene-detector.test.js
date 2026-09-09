@@ -7,6 +7,7 @@ const {
   snapSceneToCuts,
   buildActionScenes,
   buildCinemaChunkProfile,
+  normalizeCinemaLengthConfig,
   normalizeCinemaSceneCount,
   normalizeActionScenes,
   scenesOverlap,
@@ -152,25 +153,33 @@ test('buildActionScenes returns empty array for empty energy', () => {
   assert.deepEqual(buildActionScenes({ loudnessIntervals: [], sceneCuts: [] }, [], 600, 5), []);
 });
 
-test('buildCinemaChunkProfile respects target and max duration settings', () => {
+test('buildCinemaChunkProfile never cuts or merges scenes regardless of settings', () => {
   const profile = buildCinemaChunkProfile({ cinemaTargetSec: 30, cinemaMaxSec: 60 });
-  assert.equal(profile.targetChunkDurationSec, 30);
-  assert.equal(profile.maxChunkDurationSec, 60);
   assert.equal(profile.mergeShortChunks, false);
+  assert.equal(profile.maxChunkDurationSec, Infinity);
+  assert.equal(profile.hardMaxSec, Infinity);
+  assert.equal(profile.hardMinSec, 0);
+  // Every profile field disables length actions: scene length is owned by the AI.
+  const empty = buildCinemaChunkProfile();
+  assert.deepEqual(empty, profile);
 });
 
-test('buildCinemaChunkProfile clamps values to sane ranges and fixes max < target', () => {
-  const tooSmall = buildCinemaChunkProfile({ cinemaTargetSec: 1, cinemaMaxSec: 5 });
-  assert.equal(tooSmall.targetChunkDurationSec, 10);
-  assert.equal(tooSmall.maxChunkDurationSec, 15);
+test('normalizeCinemaLengthConfig clamps settings and can disable the max limit', () => {
+  const guided = normalizeCinemaLengthConfig({ cinemaTargetSec: 30, cinemaMinSec: 15, cinemaMaxSec: 60 });
+  assert.deepEqual(guided, { targetSec: 30, minSec: 15, maxSec: 60 });
 
-  const inverted = buildCinemaChunkProfile({ cinemaTargetSec: 80, cinemaMaxSec: 30 });
-  assert.equal(inverted.targetChunkDurationSec, 80);
-  assert.equal(inverted.maxChunkDurationSec, 80);
+  const unlimited = normalizeCinemaLengthConfig({ cinemaTargetSec: 45, cinemaMinSec: 20, cinemaMaxSec: 90, cinemaMaxSecEnabled: false });
+  assert.equal(unlimited.maxSec, null);
+  assert.equal(unlimited.targetSec, 45);
+  assert.equal(unlimited.minSec, 20);
 
-  const defaults = buildCinemaChunkProfile({});
-  assert.equal(defaults.targetChunkDurationSec, 45);
-  assert.equal(defaults.maxChunkDurationSec, 90);
+  const defaults = normalizeCinemaLengthConfig({});
+  assert.deepEqual(defaults, { targetSec: 45, minSec: 20, maxSec: 90 });
+
+  const clamped = normalizeCinemaLengthConfig({ cinemaTargetSec: 1, cinemaMinSec: 1, cinemaMaxSec: 5, cinemaMaxSecEnabled: true });
+  assert.equal(clamped.targetSec, 10);
+  assert.equal(clamped.minSec, 5);
+  assert.equal(clamped.maxSec, 15);
 });
 
 test('normalizeCinemaSceneCount clamps to the 5-20 range', () => {

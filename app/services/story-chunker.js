@@ -1,18 +1,14 @@
-const TARGET_CHUNK_DURATION_SEC = 180;
-const MIN_CHUNK_DURATION_SEC = 90;
-const MAX_CHUNK_DURATION_SEC = 300;
-const MAX_COMBINED_DURATION_SEC = MAX_CHUNK_DURATION_SEC + MIN_CHUNK_DURATION_SEC;
-
-// Cinema mode: movie scenes are standalone viral clips. Short scenes stay as
-// they are (no merging — merging would glue unrelated scenes together), while
-// long scenes are split at natural boundaries into TikTok-sized parts.
-const CINEMA_CHUNK_PROFILE = Object.freeze({
-  targetChunkDurationSec: 45,
-  minChunkDurationSec: 20,
-  maxChunkDurationSec: 90,
-  maxCombinedDurationSec: 90,
-  mergeShortChunks: false
-});
+// Default clip-length profile for stories mode (all values user-configurable
+// in Settings). Semantics:
+// - targetMinSec: clips shorter than this are merge candidates
+// - targetMaxSec: split points aim to land parts below this
+// - hardMinSec: clips shorter than this MUST merge (even past the target)
+// - hardMaxSec: clips longer than this get split (unless no safe cut exists)
+// - maxCombinedDurationSec: merge cap for two clips
+const DEFAULT_TARGET_MIN_SEC = 90;
+const DEFAULT_TARGET_MAX_SEC = 300;
+const DEFAULT_HARD_MIN_SEC = 60;
+const DEFAULT_HARD_MAX_SEC = 390;
 
 function clampNumber(value, min, max, fallback) {
   const numeric = Number(value);
@@ -21,14 +17,19 @@ function clampNumber(value, min, max, fallback) {
 }
 
 function buildChunkProfile(options = {}) {
-  const target = clampNumber(options.targetChunkDurationSec, 10, 3600, TARGET_CHUNK_DURATION_SEC);
-  const min = clampNumber(options.minChunkDurationSec, 5, target, MIN_CHUNK_DURATION_SEC);
-  const max = clampNumber(options.maxChunkDurationSec, min, 7200, MAX_CHUNK_DURATION_SEC);
-  const maxCombined = clampNumber(options.maxCombinedDurationSec, max, 14400, max + min);
+  const targetMin = clampNumber(options.targetMinSec, 5, 3600, DEFAULT_TARGET_MIN_SEC);
+  const targetMax = clampNumber(options.targetMaxSec, targetMin, 7200, Math.max(DEFAULT_TARGET_MAX_SEC, targetMin));
+  const hardMin = clampNumber(options.hardMinSec, 5, targetMin, Math.min(DEFAULT_HARD_MIN_SEC, targetMin));
+  const hardMax = clampNumber(options.hardMaxSec, targetMax, 14400, Math.max(DEFAULT_HARD_MAX_SEC, targetMax));
+  const maxCombined = clampNumber(options.maxCombinedDurationSec, targetMin, 14400, hardMax);
   return {
-    targetChunkDurationSec: target,
-    minChunkDurationSec: min,
-    maxChunkDurationSec: max,
+    targetMinSec: targetMin,
+    targetMaxSec: targetMax,
+    hardMinSec: hardMin,
+    hardMaxSec: hardMax,
+    targetChunkDurationSec: targetMin,
+    minChunkDurationSec: targetMin,
+    maxChunkDurationSec: hardMax,
     maxCombinedDurationSec: maxCombined,
     mergeShortChunks: options.mergeShortChunks !== false
   };
@@ -57,7 +58,7 @@ function findNaturalCut(segments, partStart, desiredEnd, latestEnd, storyEnd, pr
   let best = null;
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
-    if (segment.end < partStart + profile.minChunkDurationSec) continue;
+    if (segment.end < partStart + (profile.hardMinSec || profile.minChunkDurationSec)) continue;
     if (segment.end > latestEnd || segment.end >= storyEnd - 20) continue;
     const score = boundaryScore(segment, segments[i + 1], desiredEnd);
     if (!best || score < best.score) best = { end: segment.end, score };
@@ -67,18 +68,20 @@ function findNaturalCut(segments, partStart, desiredEnd, latestEnd, storyEnd, pr
 
 function splitLongStoryAtNaturalBoundaries(story, transcriptSegments, profile) {
   const duration = story.end - story.start;
-  if (duration <= profile.maxChunkDurationSec) return [{ ...story, partIndex: null }];
+  if (duration <= (profile.hardMaxSec || profile.maxChunkDurationSec)) return [{ ...story, partIndex: null }];
 
   const segments = normalizeTranscriptSegments(transcriptSegments)
     .filter((segment) => segment.end > story.start && segment.start < story.end);
-  const expectedParts = Math.max(2, Math.round(duration / profile.targetChunkDurationSec));
-  const desiredPartDuration = duration / expectedParts;
+  const desiredPartDuration = Math.max(
+    profile.hardMinSec || profile.minChunkDurationSec,
+    Math.min(profile.targetMaxSec || profile.maxChunkDurationSec, duration / 2)
+  );
   const chunks = [];
   let partStart = story.start;
 
-  while (story.end - partStart > profile.maxChunkDurationSec) {
+  while (story.end - partStart > (profile.hardMaxSec || profile.maxChunkDurationSec)) {
     const desiredEnd = Math.min(story.end, partStart + desiredPartDuration);
-    const latestEnd = Math.min(story.end, partStart + profile.maxChunkDurationSec);
+    const latestEnd = Math.min(story.end, partStart + (profile.hardMaxSec || profile.maxChunkDurationSec));
     const cut = findNaturalCut(segments, partStart, desiredEnd, latestEnd, story.end, profile);
     if (!cut || cut <= partStart) {
       // A long complete story is preferable to a cut in the middle of speech.
@@ -116,6 +119,22 @@ function mergeAdjacentChunks(left, right) {
   };
 }
 
+function pickMergeSide(merged, i) {
+  const candidates = [];
+  if (i > 0) candidates.push({ side: 'left', duration: merged[i].end - merged[i - 1].start });
+  if (i + 1 < merged.length) candidates.push({ side: 'right', duration: merged[i + 1].end - merged[i].start });
+  candidates.sort((a, b) => a.duration - b.duration || (a.side === 'left' ? -1 : 1));
+  return candidates[0] || null;
+}
+
+function applyMerge(merged, i, side) {
+  if (side === 'left') {
+    merged.splice(i - 1, 2, mergeAdjacentChunks(merged[i - 1], merged[i]));
+  } else {
+    merged.splice(i, 2, mergeAdjacentChunks(merged[i], merged[i + 1]));
+  }
+}
+
 function mergeShortChunks(chunks, profile) {
   const activeProfile = profile || buildChunkProfile();
   const merged = chunks.map((chunk) => ({
@@ -124,41 +143,47 @@ function mergeShortChunks(chunks, profile) {
     storyCount: Number(chunk.storyCount || 1)
   }));
 
-  // Repeatedly attach the shortest clip to the adjacent result that produces
-  // the smaller combined duration. This also absorbs a short final tail.
-  while (merged.length > 1) {
-    let changed = false;
+  // Forced pass: clips below the HARD minimum must merge with a neighbour,
+  // even if the combined clip overshoots the target range — a standalone
+  // fragment nobody will watch is worse than a slightly long clip.
+  let changed = true;
+  while (changed && merged.length > 1) {
+    changed = false;
     for (let i = 0; i < merged.length; i++) {
-      if (chunkDuration(merged[i]) >= activeProfile.minChunkDurationSec) continue;
-
-      const candidates = [];
-      if (i > 0) {
-        const duration = merged[i].end - merged[i - 1].start;
-        if (duration <= activeProfile.maxCombinedDurationSec) candidates.push({ side: 'left', duration });
-      }
-      if (i + 1 < merged.length) {
-        const duration = merged[i + 1].end - merged[i].start;
-        if (duration <= activeProfile.maxCombinedDurationSec) candidates.push({ side: 'right', duration });
-      }
-      if (!candidates.length) continue;
-
-      candidates.sort((a, b) => a.duration - b.duration || (a.side === 'left' ? -1 : 1));
-      if (candidates[0].side === 'left') {
-        merged.splice(i - 1, 2, mergeAdjacentChunks(merged[i - 1], merged[i]));
-      } else {
-        merged.splice(i, 2, mergeAdjacentChunks(merged[i], merged[i + 1]));
-      }
+      if (chunkDuration(merged[i]) >= activeProfile.hardMinSec) continue;
+      const candidate = pickMergeSide(merged, i);
+      if (!candidate) continue;
+      applyMerge(merged, i, candidate.side);
       changed = true;
       break;
     }
-    if (!changed) break;
+  }
+
+  // Target pass: clips below the TARGET minimum merge into the adjacent clip
+  // that produces the smaller combined duration, capped at maxCombined. This
+  // also absorbs a short final tail.
+  changed = true;
+  while (changed && merged.length > 1) {
+    changed = false;
+    for (let i = 0; i < merged.length; i++) {
+      if (chunkDuration(merged[i]) >= activeProfile.targetMinSec) continue;
+      const candidate = pickMergeSide(merged, i);
+      if (!candidate || candidate.duration > activeProfile.maxCombinedDurationSec) continue;
+      applyMerge(merged, i, candidate.side);
+      changed = true;
+      break;
+    }
   }
 
   return merged;
 }
 
+function isChunkProfile(value) {
+  return !!value && typeof value === 'object' && 'hardMaxSec' in value;
+}
+
 function buildStoryChunks(stories, transcriptSegments, options = {}) {
-  const profile = buildChunkProfile(options);
+  const profile = isChunkProfile(options) ? options : buildChunkProfile(options);
   const chunks = [];
   for (const story of Array.isArray(stories) ? stories : []) {
     if (!Number.isFinite(story?.start) || !Number.isFinite(story?.end) || story.end <= story.start) continue;
@@ -213,11 +238,10 @@ function fillTimelineGaps(stories, totalDuration, options = {}) {
 }
 
 module.exports = {
-  TARGET_CHUNK_DURATION_SEC,
-  MIN_CHUNK_DURATION_SEC,
-  MAX_CHUNK_DURATION_SEC,
-  MAX_COMBINED_DURATION_SEC,
-  CINEMA_CHUNK_PROFILE,
+  DEFAULT_TARGET_MIN_SEC,
+  DEFAULT_TARGET_MAX_SEC,
+  DEFAULT_HARD_MIN_SEC,
+  DEFAULT_HARD_MAX_SEC,
   buildChunkProfile,
   buildStoryChunks,
   mergeShortChunks,

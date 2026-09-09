@@ -88,6 +88,12 @@ async function getStore() {
       cinemaFillMode: { type: 'string', default: 'crop' },
       cinemaTargetSec: { type: 'number', default: 45 },
       cinemaMaxSec: { type: 'number', default: 90 },
+      cinemaMinSec: { type: 'number', default: 20 },
+      cinemaMaxSecEnabled: { type: 'boolean', default: true },
+      storiesTargetMinSec: { type: 'number', default: 90 },
+      storiesTargetMaxSec: { type: 'number', default: 300 },
+      storiesHardMinSec: { type: 'number', default: 60 },
+      storiesHardMaxSec: { type: 'number', default: 390 },
       appLanguage: { type: 'string', default: 'en' },
       appTheme: { type: 'string', default: 'dark' },
       activePresetIdStories: {
@@ -203,6 +209,12 @@ async function getSettings() {
     cinemaFillMode: store.get('cinemaFillMode'),
     cinemaTargetSec: store.get('cinemaTargetSec'),
     cinemaMaxSec: store.get('cinemaMaxSec'),
+    cinemaMinSec: store.get('cinemaMinSec'),
+    cinemaMaxSecEnabled: store.get('cinemaMaxSecEnabled'),
+    storiesTargetMinSec: store.get('storiesTargetMinSec'),
+    storiesTargetMaxSec: store.get('storiesTargetMaxSec'),
+    storiesHardMinSec: store.get('storiesHardMinSec'),
+    storiesHardMaxSec: store.get('storiesHardMaxSec'),
     appLanguage: store.get('appLanguage'),
     appTheme: store.get('appTheme'),
     activePresetIdStories: store.get('activePresetIdStories'),
@@ -280,10 +292,54 @@ async function saveSettings(settings) {
     const target = Number(settings.cinemaTargetSec);
     store.set('cinemaTargetSec', Number.isFinite(target) ? Math.max(10, Math.min(300, Math.round(target))) : 45);
   }
+  if (settings.cinemaMinSec !== undefined) {
+    const min = Number(settings.cinemaMinSec);
+    store.set('cinemaMinSec', Number.isFinite(min) ? Math.max(5, Math.min(300, Math.round(min))) : 20);
+  }
+  if (settings.cinemaMaxSecEnabled !== undefined) {
+    store.set('cinemaMaxSecEnabled', settings.cinemaMaxSecEnabled !== false);
+  }
   if (settings.cinemaMaxSec !== undefined) {
     const max = Number(settings.cinemaMaxSec);
+    // The soft max only applies when the limit is enabled; otherwise any
+    // scene length is allowed in cinema mode.
+    const maxEnabled = settings.cinemaMaxSecEnabled !== undefined
+      ? settings.cinemaMaxSecEnabled !== false
+      : store.get('cinemaMaxSecEnabled') !== false;
     const target = Number(store.get('cinemaTargetSec')) || 45;
-    store.set('cinemaMaxSec', Number.isFinite(max) ? Math.max(target, Math.max(15, Math.min(600, Math.round(max)))) : 90);
+    const clamped = Number.isFinite(max) ? Math.max(15, Math.min(600, Math.round(max))) : 90;
+    store.set('cinemaMaxSec', maxEnabled ? Math.max(target, clamped) : clamped);
+  }
+  if (settings.storiesTargetMinSec !== undefined ||
+      settings.storiesTargetMaxSec !== undefined ||
+      settings.storiesHardMinSec !== undefined ||
+      settings.storiesHardMaxSec !== undefined) {
+    // Keep the chain consistent: hardMin <= targetMin <= targetMax <= hardMax.
+    const clampSec = (value, min, max, fallback) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback;
+    };
+    const prev = {
+      targetMin: clampSec(store.get('storiesTargetMinSec'), 15, 1800, 90),
+      targetMax: clampSec(store.get('storiesTargetMaxSec'), 15, 1800, 300),
+      hardMin: clampSec(store.get('storiesHardMinSec'), 15, 1800, 60),
+      hardMax: clampSec(store.get('storiesHardMaxSec'), 15, 1800, 390)
+    };
+    const next = { ...prev };
+    if (settings.storiesHardMinSec !== undefined) next.hardMin = clampSec(settings.storiesHardMinSec, 15, 1800, prev.hardMin);
+    if (settings.storiesTargetMinSec !== undefined) next.targetMin = clampSec(settings.storiesTargetMinSec, 15, 1800, prev.targetMin);
+    if (settings.storiesTargetMaxSec !== undefined) next.targetMax = clampSec(settings.storiesTargetMaxSec, 15, 1800, prev.targetMax);
+    if (settings.storiesHardMaxSec !== undefined) next.hardMax = clampSec(settings.storiesHardMaxSec, 15, 1800, prev.hardMax);
+
+    next.hardMax = Math.max(next.targetMax, next.hardMax);
+    next.targetMax = Math.max(next.targetMin, next.targetMax);
+    next.targetMin = Math.max(next.hardMin, next.targetMin);
+    next.hardMin = Math.min(next.targetMin, next.hardMin);
+
+    store.set('storiesHardMinSec', next.hardMin);
+    store.set('storiesTargetMinSec', next.targetMin);
+    store.set('storiesTargetMaxSec', next.targetMax);
+    store.set('storiesHardMaxSec', next.hardMax);
   }
   if (settings.appLanguage !== undefined) store.set('appLanguage', settings.appLanguage);
   if (settings.appTheme !== undefined) store.set('appTheme', settings.appTheme);

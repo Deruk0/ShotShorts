@@ -21,6 +21,9 @@ const CINEMA_TARGET_DEFAULT_SEC = 45;
 const CINEMA_MAX_MIN_SEC = 15;
 const CINEMA_MAX_MAX_SEC = 600;
 const CINEMA_MAX_DEFAULT_SEC = 90;
+const CINEMA_MIN_MIN_SEC = 5;
+const CINEMA_MIN_MAX_SEC = 300;
+const CINEMA_MIN_DEFAULT_SEC = 20;
 
 function clampNumber(value, min, max, fallback) {
   const numeric = Number(value);
@@ -29,21 +32,34 @@ function clampNumber(value, min, max, fallback) {
 }
 
 /**
- * Build the cinema chunker profile from user settings: target scene length
- * (approximate part size for long scenes) and max scene length (parts are
- * never longer than this). The minimum part length is derived from the
- * target so short scenes still stay standalone clips. Pure function.
+ * Normalize the cinema length guidance settings: target / min scene length
+ * and the optional soft max (null when the limit is disabled). Pure function.
  */
-function buildCinemaChunkProfile(config = {}) {
+function normalizeCinemaLengthConfig(config = {}) {
   const target = clampNumber(config?.cinemaTargetSec, CINEMA_TARGET_MIN_SEC, CINEMA_TARGET_MAX_SEC, CINEMA_TARGET_DEFAULT_SEC);
+  const min = clampNumber(config?.cinemaMinSec, CINEMA_MIN_MIN_SEC, CINEMA_MIN_MAX_SEC, CINEMA_MIN_DEFAULT_SEC);
+  const maxEnabled = config?.cinemaMaxSecEnabled !== false;
   const maxRaw = clampNumber(config?.cinemaMaxSec, CINEMA_MAX_MIN_SEC, CINEMA_MAX_MAX_SEC, CINEMA_MAX_DEFAULT_SEC);
   const max = Math.max(target, maxRaw);
+  return { targetSec: target, minSec: min, maxSec: maxEnabled ? max : null };
+}
 
+/**
+ * Build the cinema chunker profile. Cinema scenes are NEVER cut or merged by
+ * the pipeline: scene length is a creative decision owned by the AI (guided
+ * through the prompt), so the chunker profile disables every length action.
+ * Pure function.
+ */
+function buildCinemaChunkProfile() {
   return {
-    targetChunkDurationSec: target,
-    minChunkDurationSec: Math.max(5, Math.floor(target / 2.25)),
-    maxChunkDurationSec: max,
-    maxCombinedDurationSec: max,
+    targetMinSec: 0,
+    targetMaxSec: Infinity,
+    hardMinSec: 0,
+    hardMaxSec: Infinity,
+    targetChunkDurationSec: 0,
+    minChunkDurationSec: 0,
+    maxChunkDurationSec: Infinity,
+    maxCombinedDurationSec: Infinity,
     mergeShortChunks: false
   };
 }
@@ -317,6 +333,7 @@ module.exports = {
   buildActionScenes,
   analyzeMovieEnergy,
   buildCinemaChunkProfile,
+  normalizeCinemaLengthConfig,
   normalizeCinemaSceneCount,
   normalizeActionScenes,
   scenesOverlap,
