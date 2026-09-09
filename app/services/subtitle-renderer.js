@@ -4,7 +4,6 @@
  * Falls back to ASS if Playwright/Chromium is unavailable.
  */
 
-const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -12,13 +11,23 @@ const ffmpeg = require('fluent-ffmpeg');
 const { FontManager } = require('./font-manager');
 const { createAbortError, runFfmpegCommand, throwIfAborted } = require('./cancellation');
 
+// Playwright is a dev-only dependency (large; excluded from the portable
+// build). Load it lazily so this module can still be required in prod and
+// gracefully reports "unavailable" instead of crashing at import time.
+let chromium = null;
+try {
+  ({ chromium } = require('playwright'));
+} catch {
+  chromium = null;
+}
+
 const TMP_DIR = path.join(os.tmpdir(), 'shotshorts_subtitles');
 
 // Try to locate Chromium for bundled app (relative to exe) or dev environment
 function findChromiumExecutable() {
   // 1. Default Playwright location (dev)
-  const defaultPath = chromium.executablePath();
-  if (fs.existsSync(defaultPath)) return defaultPath;
+  const defaultPath = chromium ? chromium.executablePath() : null;
+  if (defaultPath && fs.existsSync(defaultPath)) return defaultPath;
 
   // 2. Bundled with app (relative to process.execPath)
   const bundledPaths = [
@@ -117,6 +126,9 @@ class SubtitleRenderer {
     }
     if (!this.chromiumPath) {
       throw new Error('Chromium not found. Install with: npx playwright install chromium');
+    }
+    if (!chromium) {
+      throw new Error('Playwright is not available in this build; Chromium can not be launched.');
     }
 
     onProgress?.(`Starting Chromium (${path.basename(this.chromiumPath)})…`);

@@ -68,6 +68,10 @@ ShotShorts берет длинное видео или аудио, извлек�
 
 ### Установка
 
+Готовый portable-`.exe` последней версии скачивается со [страницы Releases](https://github.com/Deruk0/ShotShorts/releases): файл `ShotShorts <версия>.exe` (например, `ShotShorts 2.1.0.exe`). Ничего устанавливать не нужно — FFmpeg уже внутри, достаточно запустить файл и настроить AI-модели в приложении. Каждый релиз назван по версии программы (`v2.1.0`, `v2.1.1`, …) и содержит заметки из [CHANGELOG.md](CHANGELOG.md).
+
+Или собери из исходников:
+
 ```bash
 npm install
 ```
@@ -99,6 +103,10 @@ npm run app:build:dir
 Она создаёт `Ready_App_EXE/win-unpacked/ShotShorts.exe`. Все файлы в `Ready_App_EXE/` являются артефактами сборки и не хранятся в Git.
 
 Если сборка специально должна полагаться на системный FFmpeg, можно запустить её с `SHOTSHORTS_ALLOW_UNBUNDLED_FFMPEG=1`, но такой билд уже не будет самодостаточным.
+
+### Релизы
+
+Релизы собираются автоматически workflow-ом `.github/workflows/release.yml`: пуш тега `v*` (например `git tag v2.1.0 && git push origin v2.1.0`) запускает тесты, сборку portable `.exe` на Windows-раннере (FFmpeg докачивается в `app/resources/` автоматически) и публикацию GitHub Release с названием версии и заметками из `CHANGELOG.md`. Перед тегом нужно поднять версию в `package.json` и `app/package.json` — workflow сверяет их с тегом и падает при несовпадении.
 
 ### Документация/сайт
 
