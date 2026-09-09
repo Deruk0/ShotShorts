@@ -30,6 +30,7 @@
   "build": {
     "electronVersion": "31.7.7",
     "compression": "store",
+    "npmRebuild": false,
     "directories": {
       "output": "../Ready_App_EXE"
     },
