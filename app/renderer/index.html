@@ -27,6 +27,7 @@
     <div class="nav-tabs">
       <button class="nav-tab active" data-tab="generator">Generator</button>
       <button class="nav-tab" data-tab="settings">Settings</button>
+      <button class="nav-tab" data-tab="tiktok">TikTok</button>
     </div>
 
     <!-- GENERATOR TAB -->
@@ -70,6 +71,16 @@
           </div>
           <div class="progress-percent" id="progress-percent">0%</div>
           <div class="progress-eta" id="progress-eta">--:--</div>
+        </div>
+
+        <div id="cinema-review-section" class="cinema-review" style="display:none">
+          <div class="section-title" id="txt-cinema-review-title">Review Scenes</div>
+          <p class="hint" id="cinema-review-hint" style="margin-top:0">Uncheck scenes you don't want, adjust their boundaries, then render.</p>
+          <div id="cinema-review-list" class="cinema-review-list"></div>
+          <div class="cinema-review-actions">
+            <button type="button" class="btn btn-primary" id="btn-review-render" disabled>Render Selected</button>
+            <button type="button" class="btn btn-danger" id="btn-review-cancel">Cancel Run</button>
+          </div>
         </div>
 
         <button class="btn btn-primary generate-btn" id="btn-generate" disabled>Generate Videos</button>
@@ -311,6 +322,51 @@
             <option value="blur">Blurred Background</option>
           </select>
         </div>
+        <label class="toggle-label" style="margin-top:4px">
+          <input type="checkbox" id="cinema-bg-toggle" />
+          <span id="txt-cinema-bg-enabled">ADHD clip in parallel</span>
+        </label>
+        <div id="cinema-bg-fields" style="opacity:0.4;pointer-events:none">
+          <p class="hint" id="cinema-bg-layout-hint" style="margin-top:8px">The movie excerpt and the ADHD clip play in parallel, each in its own rectangle. Drag and stretch both rectangles in the live preview below.</p>
+          <div class="cinema-duration-row">
+            <div class="field-group">
+              <label class="field-label" id="txt-cinema-bg-canvas-fill" for="cinema-bg-canvas-fill">Empty Space Fill</label>
+              <select id="cinema-bg-canvas-fill" class="strict-select">
+                <option value="black">Black</option>
+                <option value="blurMovie">Blurred movie frame</option>
+                <option value="blurBg">Blurred ADHD frame</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label class="field-label" id="txt-cinema-bg-layer-order" for="cinema-bg-layer-order">On Top</label>
+              <select id="cinema-bg-layer-order" class="strict-select">
+                <option value="movieTop">Movie over ADHD</option>
+                <option value="bgTop">ADHD over movie</option>
+              </select>
+            </div>
+          </div>
+          <div class="cinema-duration-row">
+            <div class="field-group">
+              <label class="field-label" id="txt-cinema-clip-width" for="cinema-clip-width">Movie Width (px)</label>
+              <input type="number" id="cinema-clip-width" min="20" max="2160" step="10" value="1080" />
+            </div>
+            <div class="field-group">
+              <label class="field-label" id="txt-cinema-clip-height" for="cinema-clip-height">Movie Height (px)</label>
+              <input type="number" id="cinema-clip-height" min="20" max="3840" step="10" value="960" />
+            </div>
+          </div>
+          <div class="cinema-duration-row">
+            <div class="field-group">
+              <label class="field-label" id="txt-cinema-bg-width" for="cinema-bg-width">ADHD Width (px)</label>
+              <input type="number" id="cinema-bg-width" min="20" max="2160" step="10" value="1080" />
+            </div>
+            <div class="field-group">
+              <label class="field-label" id="txt-cinema-bg-height" for="cinema-bg-height">ADHD Height (px)</label>
+              <input type="number" id="cinema-bg-height" min="20" max="3840" step="10" value="960" />
+            </div>
+          </div>
+          <button type="button" class="btn btn-secondary" id="btn-reset-cinema-bg-layout">Reset Layout</button>
+        </div>
         <div class="cinema-duration-row">
           <div class="field-group">
             <label class="field-label" id="txt-cinema-min-label" for="cinema-min-sec">Min Length (sec)</label>
@@ -328,6 +384,10 @@
         <label class="toggle-label" style="margin-top:4px">
           <input type="checkbox" id="cinema-max-enabled" checked />
           <span id="txt-cinema-max-enabled-label">Limit max scene length</span>
+        </label>
+        <label class="toggle-label" style="margin-top:4px">
+          <input type="checkbox" id="cinema-review-enabled" checked />
+          <span id="txt-cinema-review-enabled-label">Review scenes before render</span>
         </label>
         <p class="hint" id="cinema-length-hint">Length values guide the AI when it picks scenes; strong scenes are never cut or dropped because of their length.</p>
       </div>
@@ -453,12 +513,25 @@
             <div class="subtitle-preview-head">
               <span id="txt-live-preview-title">Live Preview</span>
               <span class="preview-drag-hint" id="preview-drag-hint" style="display:none">banner: drag to move · corner to resize</span>
+              <span class="preview-drag-hint" id="preview-drag-hint-cinema" style="display:none">movie &amp; ADHD: drag to move · handles to resize</span>
             </div>
             <div class="subtitle-preview-stage" id="subtitle-preview-stage">
               <div class="subtitle-preview-frame" id="subtitle-preview-frame">
                 <div class="subtitle-preview-overlay" id="subtitle-preview-overlay">
                   <span id="subtitle-preview-text">Это предпросмотр субтитров</span>
                   <div class="subtitle-preview-handle" id="subtitle-preview-handle" title="Scale text"></div>
+                </div>
+                <div class="cinema-preview-rect cinema-preview-bg" id="cinema-bg-preview-item" style="display:none">
+                  <span class="cinema-preview-caption" id="cinema-bg-preview-caption">ADHD</span>
+                  <div class="banner-handle" data-axis="e" title="Stretch width"></div>
+                  <div class="banner-handle" data-axis="s" title="Stretch height"></div>
+                  <div class="banner-handle" data-axis="se" title="Resize"></div>
+                </div>
+                <div class="cinema-preview-rect cinema-preview-clip" id="cinema-clip-preview-item" style="display:none">
+                  <span class="cinema-preview-caption" id="cinema-clip-preview-caption">Movie</span>
+                  <div class="banner-handle" data-axis="e" title="Stretch width"></div>
+                  <div class="banner-handle" data-axis="s" title="Stretch height"></div>
+                  <div class="banner-handle" data-axis="se" title="Resize"></div>
                 </div>
                 <div class="banner-preview-item" id="banner-preview-item" style="display:none">
                   <div class="banner-preview-media" id="banner-preview-media"></div>
@@ -498,6 +571,8 @@
             <button class="btn btn-secondary" id="btn-reset-banner" disabled>Reset</button>
             <button class="btn btn-danger" id="btn-remove-banner" disabled>Remove Banner</button>
           </div>
+          <label class="toggle-label"><input type="checkbox" id="banner-chroma-key" /> <span id="txt-banner-chroma-key">Auto chroma key: green background</span></label>
+          <p class="hint" id="txt-banner-chroma-hint">Removes green automatically when enabled, including green details inside the banner.</p>
           <div class="banner-opacity-row">
             <div class="field-group banner-opacity-group">
               <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
@@ -553,6 +628,62 @@
       </div>
     </div>
 
+    <div class="tab-content" id="tab-tiktok" style="display:none">
+      <div id="tiktok-queue-panel" class="settings-section tiktok-panel"></div>
+      <details id="tt-direct" class="settings-section tiktok-panel tiktok-direct">
+        <summary class="tiktok-direct-summary"><span class="chevron" aria-hidden="true">▾</span><span data-tt="heading">Publish now · Direct Post</span></summary>
+        <p class="hint" data-tt="directHint">Publish one video immediately using a separate developer integration.</p>
+        <p class="hint" data-tt="audit">Public posting requires a TikTok app with approved Login Kit and Direct Post access. Unaudited apps can only post privately.</p>
+        <details id="tt-setup">
+          <summary class="subsection-title collapsible-title"><span class="chevron" aria-hidden="true">▾</span><span data-tt="setup">TikTok integration settings</span></summary>
+          <p class="hint" data-tt="setupHint">Register a Desktop app at developers.tiktok.com with Login Kit and Content Posting API (video.publish). Enter your app credentials locally; do not send them in chat. Disconnect before changing credentials.</p>
+          <p class="hint"><span data-tt="redirect">Register this redirect URI:</span> <code>http://127.0.0.1:8902/callback/</code></p>
+          <div class="tiktok-field-grid">
+          <div class="field-group"><label class="field-label" for="tt-key">Client key</label><input id="tt-key" type="text" autocomplete="off" maxlength="256" /></div>
+          <div class="field-group"><label class="field-label" for="tt-secret">Client secret</label><input id="tt-secret" type="password" autocomplete="off" maxlength="512" /></div>
+          </div>
+          <button type="button" class="btn btn-secondary" id="tt-save" data-tt="save">Save integration</button>
+          <p class="hint" data-tt="storage">Credentials and tokens are encrypted for your Windows user. A shared public release needs a server to protect the app secret.</p>
+        </details>
+        <div class="tiktok-actions">
+          <button type="button" class="btn btn-primary" id="tt-connect" data-tt="connect">Connect account</button>
+          <button type="button" class="btn btn-secondary" id="tt-disconnect" data-tt="disconnect" disabled>Disconnect</button>
+          <button type="button" class="btn btn-secondary" id="tt-refresh" data-tt="refresh" disabled>Refresh account</button>
+        </div>
+        <p id="tt-account" class="hint"></p>
+        <fieldset id="tt-composer" disabled>
+          <legend class="section-title" data-tt="video">Video</legend>
+          <div id="tt-media" class="tiktok-media">
+          <button type="button" class="btn btn-secondary" id="tt-pick" data-tt="pick">Choose video</button>
+          <p id="tt-file" class="hint"></p>
+          <img id="tt-preview" alt="" hidden />
+          </div>
+          <div class="field-group"><label class="field-label" for="tt-caption" data-tt="caption">Description and hashtags</label><textarea id="tt-caption" rows="3" maxlength="2200"></textarea></div>
+          <div class="field-group"><label class="field-label" for="tt-privacy" data-tt="privacy">Who can watch</label><select id="tt-privacy" class="strict-select"><option value="" hidden disabled selected>—</option></select></div>
+          <div class="tiktok-checks">
+            <label class="toggle-label"><input type="checkbox" id="tt-comment" /><span data-tt="comment">Allow comments</span></label>
+            <label class="toggle-label"><input type="checkbox" id="tt-duet" /><span data-tt="duet">Allow Duet</span></label>
+            <label class="toggle-label"><input type="checkbox" id="tt-stitch" /><span data-tt="stitch">Allow Stitch</span></label>
+            <label class="toggle-label"><input type="checkbox" id="tt-aigc" /><span data-tt="aigc">AI-generated content</span></label>
+            <label class="toggle-label"><input type="checkbox" id="tt-commercial" /><span data-tt="commercial">Promotes a brand, product or service</span></label>
+          </div>
+          <div id="tt-disclosure" class="tiktok-checks" hidden>
+            <label class="toggle-label"><input type="checkbox" id="tt-own-brand" /><span data-tt="ownBrand">Your brand — Promotional content</span></label>
+            <label class="toggle-label"><input type="checkbox" id="tt-branded" /><span data-tt="branded">Another brand — Paid partnership (cannot be private)</span></label>
+          </div>
+          <label class="toggle-label tiktok-consent"><input type="checkbox" id="tt-consent" /><span id="tt-consent-text"></span></label>
+          <div class="tiktok-actions"><button type="button" class="btn btn-primary" id="tt-publish" data-tt="publish" disabled>Publish now</button></div>
+        </fieldset>
+        <div class="tiktok-actions">
+          <button type="button" class="btn btn-danger" id="tt-cancel" data-tt="cancel" hidden>Stop waiting / uploading</button>
+          <button type="button" class="btn btn-secondary" id="tt-status-check" data-tt="checkStatus" disabled>Check publication status</button>
+        </div>
+        <p class="hint" data-tt="processingHint">TikTok may take several minutes to process a video. Stopping an upload does not delete a post already accepted by TikTok.</p>
+        <p id="tt-status" role="status" aria-live="polite"></p>
+        <p id="tt-error" role="alert" class="warning"></p>
+      </details>
+    </div>
+
     <!-- STATUS BAR -->
     <div class="status-bar">
       <div class="status-indicator"><span class="status-dot idle" id="status-dot"></span> <span id="status-text">Ready</span></div>
@@ -560,7 +691,9 @@
     </div>
   </div>
 
-  <script src="sharp-select.js?v=20260715g"></script>
-  <script src="app.js?v=20260715g"></script>
+  <script src="sharp-select.js?v=20260716a"></script>
+  <script src="app.js?v=20260716a"></script>
+  <script src="tiktok.js"></script>
+  <script src="tiktok-queue.js"></script>
 </body>
 </html>

@@ -125,10 +125,11 @@ const groqTranscriptionKeyCursor = { current: 0 };
 // Helpers
 // ---------------------------------------------------------------------------
 function seconds2ass(t) {
-  const h = Math.floor(t / 3600);
-  const m = Math.floor((t % 3600) / 60);
-  const s = t % 60;
-  return `${h}:${String(m).padStart(2, '0')}:${String(s.toFixed(2)).padStart(5, '0')}`;
+  const ticks = Math.round(Math.max(0, Number(t) || 0) * 100);
+  const h = Math.floor(ticks / 360000);
+  const m = Math.floor(ticks / 6000) % 60;
+  const s = Math.floor(ticks / 100) % 60;
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ticks % 100).padStart(2, '0')}`;
 }
 
 function seconds2srt(t) {
@@ -616,7 +617,7 @@ class WhisperService {
   _parseVerboseResult(result) {
     const segments = [];
 
-    if (result.segments && Array.isArray(result.segments)) {
+    if (Array.isArray(result.segments) && result.segments.length > 0) {
       for (const seg of result.segments) {
         const words = [];
         if (result.words && Array.isArray(result.words)) {
@@ -866,7 +867,7 @@ class WhisperService {
       out.push({
         start: shiftedStart,
         end: shiftedEnd,
-        text: String(seg?.text || '').trim(),
+        text: words.length ? words.map((word) => word.word).join(' ') : String(seg?.text || '').trim(),
         words
       });
     }
@@ -889,10 +890,12 @@ class WhisperService {
     const position = subtitleOptions.position || 'bottom';
     const useCustomPos = !!subtitleOptions.customPos;
     const alignment = useCustomPos ? 5 : (position === 'top' ? 8 : (position === 'middle' ? 5 : 2));
+    const customX = Number(subtitleOptions.customX);
+    const customY = Number(subtitleOptions.customY);
     // \pos() overrides margins entirely; anchor is the line's center point
     // (Alignment 5), so the same X/Y works for one-word and multi-line text.
     const customPosTag = useCustomPos
-      ? `{\\pos(${Math.max(0, Math.min(1080, Math.round(Number(subtitleOptions.customX) || 540)))},${Math.max(0, Math.min(1920, Math.round(Number(subtitleOptions.customY) || 1850)))})}`
+      ? `{\\pos(${Math.max(0, Math.min(1080, Math.round(Number.isFinite(customX) ? customX : 540)))},${Math.max(0, Math.min(1920, Math.round(Number.isFinite(customY) ? customY : 1850)))})}`
       : '';
     const fontSize = Math.max(12, Number(subtitleOptions.fontSize || style.fontSize || 20));
     const marginV = Math.max(10, Number(subtitleOptions.marginV || style.marginV || 40));

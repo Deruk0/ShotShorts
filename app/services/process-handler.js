@@ -19,14 +19,146 @@ const {
   normalizeCinemaSceneCount,
   normalizeActionScenes,
   buildCinemaSceneList,
+  applySceneEdits,
+  snapDialogueSceneStart,
   writeSceneMetaFile
 } = require('./cinema-scene-detector');
 const { computeBannerLayout, isImageBanner, hasAlphaPixFmt } = require('./banner-utils');
+const {
+  normalizeCinemaBgCanvasFill,
+  normalizeCinemaBgLayerOrder,
+  computeCinemaClipLayout,
+  computeCinemaBgRectLayout
+} = require('./cinema-bg-utils');
 const { resolveModelChain } = require('./model-registry');
 
 let processor = null;
 let isRunning = false;
 let activeAbortController = null;
+let activeReview = null; // pending cinema review: { resolve } or null
+
+// Resolve the pending review (decision payload from the renderer or null
+// when cancelled/aborted). No-op when no review is pending.
+function resolveReview(payload) {
+  const review = activeReview;
+  activeReview = null;
+  if (!review) return;
+  try { review.resolve(payload || null); } catch {}
+}
+
+/**
+ * Grab a single still frame from the source movie as a PNG data URL.
+ * Input-side seek (-ss before -i) keeps it fast even deep into the movie.
+ * Resolves null on any failure — a missing preview never blocks review.
+ */
+function captureStillFrame(sourceVideoPath, seekTo, widthPx) {
+  const out = path.join(os.tmpdir(), `ss_cinema_review_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`);
+  return new Promise((resolve) => {
+    ffmpeg(sourceVideoPath)
+      .setStartTime(Math.max(0, seekTo))
+      .outputOptions(['-frames:v', '1', '-vf', `scale=${widthPx}:-2`])
+      .output(out)
+      .on('end', () => {
+        try {
+          resolve(`data:image/png;base64,${fs.readFileSync(out).toString('base64')}`);
+        } catch {
+          resolve(null);
+        } finally {
+          try { fs.unlinkSync(out); } catch {}
+        }
+      })
+      .on('error', () => {
+        try { fs.unlinkSync(out); } catch {}
+        resolve(null);
+      })
+      .run();
+  });
+}
+
+async function captureScenePreviews(scenes, sourceVideoPath, onProgress, signal) {
+  const previews = [];
+  for (let i = 0; i < scenes.length; i++) {
+    throwIfAborted(signal);
+    const scene = scenes[i];
+    const duration = Math.max(0, (Number(scene.end) || 0) - (Number(scene.start) || 0));
+    const seekTo = (Number(scene.start) || 0) + Math.min(0.5, duration / 4);
+    previews.push(await captureStillFrame(sourceVideoPath, seekTo, 180));
+    onProgress?.(`Preparing scene previews: ${i + 1}/${scenes.length}`);
+  }
+  return previews;
+}
+
+/**
+ * Cinema review pause: render one preview frame per scene, push the full
+ * scene list to the renderer, and wait for its decision. Resolves with
+ * { scenes } (edits applied) or null when declined/aborted/cancelled.
+ */
+async function requestSceneReview(scenes, config, ctx) {
+  const { send, signal, sourceAudioDuration } = ctx;
+
+  const previews = await captureScenePreviews(
+    scenes,
+    config.sourceVideo,
+    (msg) => send({ step: 'Review Scenes', percent: 47, stage: 'render', stagePercent: 0, message: msg }),
+    signal
+  );
+  throwIfAborted(signal);
+
+  const reviewScenes = scenes.map((scene, i) => ({
+    index: Number(scene.index) || i + 1,
+    title: String(scene.title || ''),
+    hook: String(scene.hook || ''),
+    source: scene.source === 'action' ? 'action' : 'llm',
+    start: Number((Number(scene.start) || 0).toFixed(2)),
+    end: Number((Number(scene.end) || 0).toFixed(2)),
+    durationSec: Number(Math.max(0, ((Number(scene.end) || 0) - (Number(scene.start) || 0))).toFixed(2)),
+    intensity: Number(scene.intensity) || 0,
+    preview: previews[i] || null
+  }));
+
+  // The review wait is billed to the render stage on purpose: it replaces
+  // nothing, and the renderer's ETA simply holds its last estimate while
+  // the user decides.
+  send({
+    step: 'Review Scenes',
+    percent: 48,
+    stage: 'render',
+    stagePercent: 0,
+    message: 'Waiting for scene review…',
+    reviewScenes
+  });
+
+  const decision = await new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      activeReview = null;
+      signal.removeEventListener('abort', onAbort);
+      resolve(value);
+    };
+    const onAbort = () => finish(null);
+    activeReview = { resolve: finish };
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+
+  if (!decision || decision.accept !== true) return null;
+
+  const editMap = {};
+  for (const edit of (Array.isArray(decision.scenes) ? decision.scenes : [])) {
+    if (!edit || typeof edit !== 'object') continue;
+    const idx = Number(edit.index);
+    if (!Number.isFinite(idx)) continue;
+    editMap[idx] = {
+      include: edit.include !== false,
+      start: Number(edit.start),
+      end: Number(edit.end)
+    };
+  }
+
+  return { scenes: applySceneEdits(scenes, editMap, sourceAudioDuration) };
+}
 
 // Fallback stage tagging for progress events that don't carry an explicit
 // stage field (renderer builds its smooth ETA from these stage ids).
@@ -73,8 +205,8 @@ function buildSubtitleOptions(config) {
       : ['highlight'],
     caseName: config.subtitleCase || 'sentence',
     customPos: !!config.subtitleCustomPos,
-    customX: Number(config.subtitleX || 540),
-    customY: Number(config.subtitleY || 1850)
+    customX: Number(config.subtitleX ?? 540),
+    customY: Number(config.subtitleY ?? 1850)
   };
 }
 
@@ -99,7 +231,10 @@ function prepareAudioForWhisper(inputAudioPath, onProgress, signal) {
         });
       });
 
-  return runFfmpegCommand(cmd, { signal }).then(() => outPath);
+  return runFfmpegCommand(cmd, { signal }).then(() => outPath).catch((err) => {
+    try { fs.unlinkSync(outPath); } catch {}
+    throw err;
+  });
 }
 
 /**
@@ -148,30 +283,85 @@ async function runCinemaPipeline(ctx) {
     }
   }
 
-  // Action candidates: loud + cut-heavy + speechless windows.
-  let actionScenes = [];
-  const remaining = Math.max(0, sceneCount - llmScenes.length);
-  if (remaining > 0) {
-    try {
-      const energy = await analyzeMovieEnergy(
-        config.sourceVideo,
-        (msg) => send({ step: 'Detecting Action', percent: 40, stage: 'scenes', stagePercent: null, message: msg }),
-        signal
-      );
-      actionScenes = buildActionScenes(energy, transcriptSegments, sourceAudioDuration, remaining);
-    } catch (err) {
-      if (isAbortError(err) || signal.aborted) throw err;
-      send({ step: 'Detecting Action', percent: 44, stage: 'scenes', stagePercent: null, message: `Action detection failed (${err.message}). Continuing without action scenes.` });
-    }
+  // Energy pass (loudness + visual cuts) runs for EVERY cinema job: the
+  // detected cuts snap dialogue scene starts to real shot boundaries, and
+  // action windows are built only when the LLM did not fill the quota.
+  let energy = { loudnessIntervals: [], sceneCuts: [] };
+  try {
+    energy = await analyzeMovieEnergy(
+      config.sourceVideo,
+      (msg) => send({ step: 'Detecting Action', percent: 40, stage: 'scenes', stagePercent: null, message: msg }),
+      signal
+    );
+  } catch (err) {
+    if (isAbortError(err) || signal.aborted) throw err;
+    send({ step: 'Detecting Action', percent: 44, stage: 'scenes', stagePercent: null, message: `Action detection failed (${err.message}). Continuing without energy data.` });
   }
 
-  const scenes = buildCinemaSceneList(
+  // Action candidates: loud + cut-heavy + speechless windows sized by the
+  // user's target scene length.
+  let actionScenes = [];
+  const remaining = Math.max(0, sceneCount - llmScenes.length);
+  if (remaining > 0 && energy.loudnessIntervals.length) {
+    actionScenes = buildActionScenes(energy, transcriptSegments, sourceAudioDuration, remaining, lengthConfig);
+  }
+
+  let scenes = buildCinemaSceneList(
     llmScenes,
     normalizeActionScenes(actionScenes, sourceAudioDuration, llmScenes.length),
     sourceAudioDuration
   );
+
+  // Dialogue scene starts snap to a nearby visual cut so no clip opens
+  // mid-shot; the previous scene's end guards against overlaps.
+  if (energy.sceneCuts.length) {
+    let prevEnd = 0;
+    scenes = scenes.map((scene) => {
+      if (scene.source !== 'llm') {
+        prevEnd = Math.max(prevEnd, scene.end);
+        return scene;
+      }
+      const snapped = snapDialogueSceneStart(scene, energy.sceneCuts, sourceAudioDuration, prevEnd);
+      prevEnd = Math.max(prevEnd, snapped.end);
+      return snapped;
+    });
+  }
+
   if (!scenes.length) {
     return { success: false, error: 'No scenes could be selected from this movie.' };
+  }
+
+  // Action scenes get a human title + hook when the transcript inside their
+  // window gives the model something to anchor on.
+  if (scenes.some((scene) => scene.source === 'action') && transcriptSegments.length) {
+    try {
+      const titler = new GroqStoryAnalyzer([], proxy, null);
+      titler.setModelChain(analysisModels);
+      await titler.titleActionScenes(
+        scenes,
+        transcriptSegments,
+        (msg) => send({ step: 'Naming Scenes', percent: 44, stage: 'scenes', stagePercent: null, message: msg }),
+        { signal }
+      );
+      throwIfAborted(signal);
+    } catch (err) {
+      if (isAbortError(err) || signal.aborted) throw err;
+      send({ step: 'Naming Scenes', percent: 44, stage: 'scenes', stagePercent: null, message: `Action scene naming failed (${err.message}). Keeping fallback titles.` });
+    }
+  }
+
+  // Optional review screen: pause before rendering and let the user exclude
+  // scenes or move boundaries. Resolved by the cinema:reviewDecision IPC.
+  if (config.cinemaReview) {
+    const decision = await requestSceneReview(scenes, config, ctx);
+    if (!decision) {
+      return { success: false, cancelled: true, error: 'Cancelled at review' };
+    }
+    scenes = decision.scenes;
+    if (!scenes.length) {
+      send({ step: 'Complete!', percent: 100, stage: 'finalize', stagePercent: 100, message: 'No scenes left after review — nothing rendered.' });
+      return { success: true, outputFiles: [], subtitleFailures: [], storiesDetected: 0, chunksProduced: 0, reviewDeclinedAll: true };
+    }
   }
 
   send({
@@ -179,7 +369,7 @@ async function runCinemaPipeline(ctx) {
     percent: 46,
     stage: 'scenes',
     stagePercent: 100,
-    message: `${llmScenes.length} dialogue + ${scenes.length - llmScenes.length} action scene(s) selected`
+    message: `${scenes.filter((s) => s.source === 'llm').length} dialogue + ${scenes.filter((s) => s.source === 'action').length} action scene(s) selected`
   });
 
   const chunks = buildStoryChunks(scenes, transcriptSegments, chunkProfile);
@@ -222,6 +412,7 @@ async function runCinemaPipeline(ctx) {
       bannerOptions = {
         path: config.bannerPath,
         isImage: isImageBanner(config.bannerPath),
+        chromaKey: config.bannerChromaKey === true,
         layout,
         opacity: Math.max(0, Math.min(100, Number(config.bannerOpacity === undefined ? 100 : config.bannerOpacity))) / 100,
         bannerHasAudio: !!dims.hasAudio,
@@ -232,6 +423,29 @@ async function runCinemaPipeline(ctx) {
       send({ step: 'Banner Skipped', percent: 50, stage: 'prepare', stagePercent: null, message: `Banner disabled: ${bannerErr.message}.` });
       bannerOptions = null;
     }
+  }
+
+  // Parallel ADHD layer (cinema+bg): folder clips play muted and chained in
+  // their own rectangle while the movie excerpt plays in the other one. The
+  // selection context is shared across chunks so consecutive clips never
+  // reuse the same background video (stories-mode semantics).
+  let cinemaBgLayer = null;
+  if (config.cinemaBgEnabled) {
+    throwIfAborted(signal);
+    const allBgs = mp.getBackgroundVideos(config.backgroundFolder);
+    if (!allBgs.length) {
+      return { success: false, error: 'No video files in background folder' };
+    }
+    cinemaBgLayer = {
+      all: allBgs,
+      unused: [...allBgs].sort(() => Math.random() - 0.5),
+      durations: {},
+      canvasFill: normalizeCinemaBgCanvasFill(config.cinemaBgCanvasFill),
+      layerOrder: normalizeCinemaBgLayerOrder(config.cinemaBgLayerOrder),
+      clipLayout: computeCinemaClipLayout(config),
+      bgLayout: computeCinemaBgRectLayout(config)
+    };
+    send({ step: 'Cinema ADHD Layer', percent: 49, stage: 'prepare', stagePercent: null, message: `Parallel ADHD layer on: ${allBgs.length} clip(s) in the folder · canvas ${cinemaBgLayer.canvasFill}` });
   }
 
   const outputFiles = [];
@@ -279,18 +493,35 @@ async function runCinemaPipeline(ctx) {
       }
     }
 
+    // Per-chunk ADHD selection: enough random folder clips to cover the
+    // scene duration (+5s concat safety, same as stories backgrounds).
+    let cinemaBg = null;
+    if (cinemaBgLayer) {
+      throwIfAborted(signal);
+      const selection = await mp.selectBackgroundVideos(cinemaBgLayer, (chunk.end - chunk.start) + 5);
+      cinemaBg = {
+        files: selection.files,
+        totalDur: selection.totalDur,
+        canvasFill: cinemaBgLayer.canvasFill,
+        layerOrder: cinemaBgLayer.layerOrder,
+        clipLayout: cinemaBgLayer.clipLayout,
+        bgLayout: cinemaBgLayer.bgLayout
+      };
+    }
+
     const out = await mp.assembleCinemaClip(
       chunk,
       config.sourceVideo,
       config.outputFolder,
-      { fillMode },
+      { fillMode, cinemaBg },
       sp,
       subtitlePath,
       subtitleOptions,
       bannerOptions
     );
-    throwIfAborted(signal);
     outputFiles.push(out);
+    await ctx.onGenerated?.(out);
+    throwIfAborted(signal);
     writeSceneMetaFile(out, chunk);
   }
 
@@ -305,7 +536,7 @@ async function runCinemaPipeline(ctx) {
   };
 }
 
-function register() {
+function register({ onGenerated = async () => {} } = {}) {
   const mp = new MediaProcessor();
   ipcMain.handle('process:start', async (event, config) => {
     if (isRunning) return { success: false, error: 'Process already running' };
@@ -314,7 +545,11 @@ function register() {
     if (!win) return { success: false, error: 'No window' };
 
     const isCinemaMode = !!config && config.mode === 'cinema';
-    if (!config || !config.sourceVideo || !config.outputFolder || (!isCinemaMode && !config.backgroundFolder)) {
+    // The background folder is required for stories mode AND for cinema mode
+    // with the parallel ADHD layer enabled.
+    const cinemaBgActive = !!(config && isCinemaMode && config.cinemaBgEnabled);
+    const needsBgFolder = !isCinemaMode || cinemaBgActive;
+    if (!config || !config.sourceVideo || !config.outputFolder || (needsBgFolder && !config.backgroundFolder)) {
       return { success: false, error: 'Missing required configuration' };
     }
 
@@ -332,11 +567,27 @@ function register() {
       try { win.webContents.send('process:progress', payload); } catch {}
     };
     const tempFiles = [];
+    const generatedFiles = [];
+    const deliveredFiles = new Set();
+    const saveGenerated = async (result) => {
+      const pending = generatedFiles.filter(file => !deliveredFiles.has(file));
+      if (pending.length) {
+        try {
+          await onGenerated(pending);
+          pending.forEach(file => deliveredFiles.add(file));
+        } catch { result.tiktokQueueError = 'queue_storage_error'; }
+      }
+      return result;
+    };
+    const reportGenerated = async (file) => {
+      generatedFiles.push(file);
+      await saveGenerated({});
+    };
 
     try {
       throwIfAborted(signal);
       if (!fs.existsSync(config.sourceVideo)) return { success: false, error: 'Source media not found' };
-      if (!isCinemaMode && !fs.existsSync(config.backgroundFolder)) return { success: false, error: 'Background folder not found' };
+      if (needsBgFolder && !fs.existsSync(config.backgroundFolder)) return { success: false, error: 'Background folder not found' };
       if (!fs.existsSync(config.outputFolder)) fs.mkdirSync(config.outputFolder, { recursive: true });
 
       const proxy = await getProxy();
@@ -439,11 +690,11 @@ function register() {
       throwIfAborted(signal);
 
       if (isCinemaMode) {
-        return await runCinemaPipeline({
+        return await saveGenerated(await runCinemaPipeline({
           config, win, send, signal, tempFiles, mp, whisper, whisperAudioPath,
           transcriptSegments, sourceAudioDuration, proxy, analysisModels,
-          subtitlesEnabled, subtitleLanguage, subtitleOffsetSec, subtitleOptions
-        });
+          subtitlesEnabled, subtitleLanguage, subtitleOffsetSec, subtitleOptions, onGenerated: reportGenerated
+        }));
       }
 
       if (!transcriptSegments.length) {
@@ -569,6 +820,7 @@ function register() {
             bannerOptions = {
               path: config.bannerPath,
               isImage: isImageBanner(config.bannerPath),
+              chromaKey: config.bannerChromaKey === true,
               layout,
               opacity: bannerOpacityPct / 100,
               bannerHasAudio: !!dims.hasAudio,
@@ -682,8 +934,9 @@ function register() {
           subtitleOptions,
           bannerOptions
         );
-        throwIfAborted(signal);
         outputFiles.push(out);
+        await reportGenerated(out);
+        throwIfAborted(signal);
       }
 
       let doneMsg = `Created ${outputFiles.length} video(s)`;
@@ -692,24 +945,25 @@ function register() {
       }
 
       send({ step: 'Complete!', percent: 100, stage: 'finalize', stagePercent: 100, message: doneMsg });
-      return {
+      return await saveGenerated({
         success: true,
         outputFiles,
         subtitleFailures,
         storiesDetected: normalizedStories.length,
         chunksProduced: chunks.length
-      };
+      });
     } catch (err) {
       if (isAbortError(err) || signal.aborted) {
         send({ step: 'Cancelled', percent: 0, stage: null, message: 'Generation cancelled.' });
-        return { success: false, cancelled: true, error: 'Cancelled' };
+        return await saveGenerated({ success: false, cancelled: true, error: 'Cancelled' });
       }
       const msg = err.message || 'Unknown error';
       send({ step: 'Error', percent: 0, stage: null, message: msg });
-      return { success: false, error: msg };
+      return await saveGenerated({ success: false, error: msg });
     } finally {
       processor = null;
       activeAbortController = null;
+      activeReview = null;
       isRunning = false;
       for (const file of tempFiles) {
         try { if (file) fs.unlinkSync(file); } catch {}
@@ -721,7 +975,16 @@ function register() {
     if (activeAbortController && !activeAbortController.signal.aborted) {
       activeAbortController.abort();
     }
+    // A pending cinema review resolves as a cancellation so the waiting
+    // pipeline unblocks immediately.
+    resolveReview(null);
     if (processor) processor.cancel();
+  });
+
+  // Renderer's decision on the cinema review screen. Sent via ipcMain.on —
+  // the pipeline result still travels through the process:start response.
+  ipcMain.on('cinema:reviewDecision', (_event, payload) => {
+    resolveReview(payload);
   });
 }
 

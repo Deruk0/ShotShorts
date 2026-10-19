@@ -9,10 +9,7 @@
     "app:build": "npm --workspace app run build",
     "app:build:dir": "npm --workspace app run build:dir",
     "app:build:fast": "npm --workspace app run build:fast",
-    "app:build:portable": "npm --workspace app run build:portable",
-    "web:dev": "npm --workspace web run dev",
-    "web:build": "npm --workspace web run build",
-    "web:lint": "npm --workspace web run lint"
+    "app:build:portable": "npm --workspace app run build:portable"
   },
   "repository": {
     "type": "git",
@@ -36,7 +33,6 @@
   "author": "Deruk0",
   "license": "MIT",
   "workspaces": [
-    "app",
-    "web"
+    "app"
   ]
 }

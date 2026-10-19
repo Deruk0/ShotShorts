@@ -30,6 +30,39 @@ test('toASS clamps out-of-range free positions', () => {
   assert.ok(ass.includes('{\\pos(1080,0)}'));
 });
 
+test('toASS preserves zero coordinates and defaults invalid coordinates', () => {
+  const ws = new WhisperService();
+  const ass = ws.toASS(segments, 'Classic', 0, { customPos: true, customX: 0, customY: 0 });
+  assert.ok(ass.includes('{\\pos(0,0)}'));
+  const fallback = ws.toASS(segments, 'Classic', 0, { customPos: true, customX: 'bad', customY: 'bad' });
+  assert.ok(fallback.includes('{\\pos(540,1850)}'));
+});
+
+test('ASS timestamp rounding carries seconds into minutes and hours', () => {
+  const ws = new WhisperService();
+  for (const [start, expected] of [[59.999, '0:01:00.00'], [3599.999, '1:00:00.00']]) {
+    const ass = ws.toASS([{ start, end: start + 1, text: 'hello', words: [] }]);
+    const event = ass.split('\n').find((line) => line.startsWith('Dialogue:'));
+    assert.equal(event.split(',')[1], expected);
+  }
+});
+
+test('sliceSegments limits text to the words inside the clip', () => {
+  const ws = new WhisperService();
+  const sliced = ws.sliceSegments(segments, 0.5, 1);
+  assert.equal(sliced[0].text, 'world');
+  assert.equal(sliced[0].words[0].start, 0);
+  assert.ok(!ws.toSRT(sliced).toLowerCase().includes('hello'));
+});
+
+test('empty segment arrays still use the supplied word timestamps', () => {
+  const ws = new WhisperService();
+  const parsed = ws._parseVerboseResult({ segments: [], words: segments[0].words, text: 'hello world' });
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].end, 1);
+  assert.equal(parsed[0].text, 'hello world');
+});
+
 test('toASS keeps classic margin positioning when free position is off', () => {
   const ws = new WhisperService();
   const ass = ws.toASS(segments, 'Classic', 0, { position: 'bottom', wordsPerLine: 3 }, 'sentence');

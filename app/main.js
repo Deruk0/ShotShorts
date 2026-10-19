@@ -1,11 +1,11 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, safeStorage, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const ffmpeg = require('fluent-ffmpeg');
 const { getSettings, saveSettings, getStats, saveStats } = require('./services/store');
 const { runCleanup } = require('./services/cleanup');
-const { isImageBanner, resolveDisplayDimensions } = require('./services/banner-utils');
+const { isImageBanner, resolveDisplayDimensions, BANNER_CHROMA_FILTER } = require('./services/banner-utils');
 
 let mainWindow = null;
 
@@ -17,8 +17,8 @@ const IMAGE_MIME = {
   '.bmp': 'image/bmp'
 };
 
-function buildBannerThumbnail(filePath, isImage) {
-  if (isImage) {
+function buildBannerThumbnail(filePath, isImage, chromaKey = false) {
+  if (isImage && !chromaKey) {
     try {
       const stats = fs.statSync(filePath);
       if (stats.size > 4 * 1024 * 1024) return Promise.resolve(null);
@@ -29,10 +29,10 @@ function buildBannerThumbnail(filePath, isImage) {
     }
   }
 
-  const out = path.join(os.tmpdir(), `ss_banner_thumb_${Date.now()}.png`);
+  const out = path.join(os.tmpdir(), `ss_banner_thumb_${require('crypto').randomUUID()}.png`);
   return new Promise((resolve) => {
     ffmpeg(filePath)
-      .outputOptions(['-frames:v', '1', '-vf', 'scale=360:-2'])
+      .outputOptions(['-frames:v', '1', '-vf', `${chromaKey ? BANNER_CHROMA_FILTER + ',' : ''}scale=360:-2`])
       .output(out)
       .on('end', () => {
         try {
@@ -72,7 +72,8 @@ function createWindow() {
 
 app.whenReady().then(() => {
   runCleanup();
-  require('./services/process-handler').register();
+  const tiktok = require('./services/tiktok-ipc').register({ app, ipcMain, safeStorage, shell, getWindow: () => mainWindow });
+  require('./services/process-handler').register({ onGenerated: tiktok.addGenerated });
   createWindow();
 });
 
@@ -117,7 +118,7 @@ ipcMain.handle('dialog:selectOutputFolder', async () => {
   return result.canceled ? null : result.filePaths[0];
 });
 
-ipcMain.handle('media:probe', async (_event, filePath) => {
+ipcMain.handle('media:probe', async (_event, filePath, options) => {
   try {
     if (!filePath || typeof filePath !== 'string' || !fs.existsSync(filePath)) {
       return { success: false, error: 'File not found' };
@@ -130,7 +131,7 @@ ipcMain.handle('media:probe', async (_event, filePath) => {
     const dims = resolveDisplayDimensions(stream);
     if (!dims.width || !dims.height) return { success: false, error: 'No readable video stream' };
     const isImage = isImageBanner(filePath);
-    const thumbnail = await buildBannerThumbnail(filePath, isImage);
+    const thumbnail = await buildBannerThumbnail(filePath, isImage, options?.chromaKey === true);
     return { success: true, width: dims.width, height: dims.height, isImage, thumbnail };
   } catch (err) {
     return { success: false, error: err.message || 'Probe failed' };

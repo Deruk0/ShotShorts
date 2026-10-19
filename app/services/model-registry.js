@@ -71,7 +71,7 @@ function normalizeCustomModels(list, providers = []) {
     const providerId = String(entry.providerId || '').trim();
     const modelId = String(entry.modelId || '').trim();
     if (!providerId || !modelId) return;
-    if (providerIds.size > 0 && !providerIds.has(providerId)) return;
+    if (!providerIds.has(providerId)) return;
     const id = String(entry.id || '').trim() || createEntityId('cm');
     if (seen.has(id)) return;
     seen.add(id);

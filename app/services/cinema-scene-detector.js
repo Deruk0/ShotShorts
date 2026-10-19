@@ -4,6 +4,9 @@ const { runFfmpegCommand } = require('./cancellation');
 
 // --- Tunable defaults -------------------------------------------------------
 const SCENE_WINDOW_SEC = 15;          // candidate action window length
+const DIALOGUE_SNAP_TOLERANCE_SEC = 2; // how far back a dialogue scene start may snap to a visual cut
+const ACTION_WINDOW_MIN_SEC = 8;     // lower clamp for length-aware action windows
+const ACTION_WINDOW_MAX_SEC = 90;    // upper clamp for length-aware action windows
 const SPEECH_COVERAGE_MAX = 0.12;     // window counts as quiet if less than this fraction is spoken
 const CUTS_PER_MIN_BASELINE = 12;     // below this the montage is considered calm
 const MIN_LUFS_DELTA = 4;             // how much louder than movie average a window must be
@@ -129,12 +132,15 @@ function parseSceneCuts(log) {
 /**
  * Score sliding windows for action energy and pick non-overlapping top ones.
  * Pure function. A window scores high when it is much louder than the movie
- * average, cut-heavy (fast montage) and mostly speechless.
+ * average, cut-heavy (fast montage) and mostly speechless. windowSec
+ * controls the window length (default SCENE_WINDOW_SEC); the step is half
+ * the window so neighbouring windows overlap by 50%.
  *
  * @returns {Array<{start:number,end:number,score:number}>}
  */
-function scoreActionWindows(loudnessIntervals, sceneCuts, speechSegments, totalDuration, requested) {
+function scoreActionWindows(loudnessIntervals, sceneCuts, speechSegments, totalDuration, requested, windowSec = SCENE_WINDOW_SEC) {
   if (!Number.isFinite(totalDuration) || totalDuration <= 0 || requested <= 0) return [];
+  const winSec = Number.isFinite(windowSec) && windowSec > 0 ? windowSec : SCENE_WINDOW_SEC;
   const speech = (Array.isArray(speechSegments) ? speechSegments : [])
     .map((s) => ({ start: Math.max(0, Number(s?.start) || 0), end: Number(s?.end) || 0 }))
     .filter((s) => s.end > s.start);
@@ -143,9 +149,9 @@ function scoreActionWindows(loudnessIntervals, sceneCuts, speechSegments, totalD
   const avgLufs = values.length ? values.reduce((a, b) => a + b, 0) / values.length : -70;
 
   const windows = [];
-  const step = SCENE_WINDOW_SEC / 2;
-  for (let start = 0; start + SCENE_WINDOW_SEC <= totalDuration; start += step) {
-    const end = start + SCENE_WINDOW_SEC;
+  const step = winSec / 2;
+  for (let start = 0; start + winSec <= totalDuration; start += step) {
+    const end = start + winSec;
 
     const inside = loudnessIntervals.filter((i) => i.start >= start && i.end <= end);
     const lufs = inside.length
@@ -153,13 +159,13 @@ function scoreActionWindows(loudnessIntervals, sceneCuts, speechSegments, totalD
       : avgLufs;
 
     const cuts = sceneCuts.filter((c) => c.time >= start && c.time < end);
-    const cutsPerMin = (cuts.length / SCENE_WINDOW_SEC) * 60;
+    const cutsPerMin = (cuts.length / winSec) * 60;
 
     const speechSeconds = speech.reduce((acc, s) => {
       const overlap = Math.min(end, s.end) - Math.max(start, s.start);
       return acc + Math.max(0, overlap);
     }, 0);
-    const speechCoverage = speechSeconds / SCENE_WINDOW_SEC;
+    const speechCoverage = speechSeconds / winSec;
 
     const loudnessBoost = Math.max(0, lufs - (avgLufs + MIN_LUFS_DELTA));
     const cutBoost = Math.max(0, cutsPerMin - CUTS_PER_MIN_BASELINE);
@@ -222,16 +228,58 @@ function snapSceneToCuts(scene, sceneCuts, totalDuration) {
 }
 
 /**
- * Build action scenes for cinema mode: score windows, snap to cuts, clamp to
- * safe edges and drop overlaps. Pure function.
+ * Snap the START of an LLM dialogue scene to a nearby visual cut so the
+ * clip does not begin mid-shot. Unlike snapSceneToCuts (built for action
+ * windows, tolerance 3x) this only moves the start BACKWARD by at most
+ * DIALOGUE_SNAP_TOLERANCE_SEC: dialogue scenes already carry their own
+ * narrative opening, and pulling in extra footage far before the speech
+ * would add dead exposition. The end is never touched, and the snap is
+ * skipped when it would overlap the previous scene. Pure function.
  */
-function buildActionScenes(energy, speechSegments, totalDuration, requested) {
+function snapDialogueSceneStart(scene, sceneCuts, totalDuration, prevSceneEnd = 0) {
+  const start = Math.max(0, Number(scene?.start) || 0);
+  const end = Number(scene?.end) || start;
+  if (!(end > start)) return { ...scene, start, end };
+  if (!Array.isArray(sceneCuts) || !sceneCuts.length) return { ...scene, start, end };
+
+  const tolerance = Math.min(DIALOGUE_SNAP_TOLERANCE_SEC, start);
+  const candidate = sceneCuts
+    .filter((c) => c.time <= start && c.time >= start - tolerance && c.time >= 0)
+    .sort((a, b) => b.time - a.time)[0];
+
+  if (!candidate) return { ...scene, start, end };
+  // A cut basically on the start already — nothing to fix.
+  if (start - candidate.time < 0.05) return { ...scene, start, end };
+
+  let newStart = candidate.time;
+  const prevEnd = Math.max(0, Number(prevSceneEnd) || 0);
+  if (newStart <= prevEnd + 0.1) return { ...scene, start, end };
+  newStart = clamp(newStart, 0, Math.max(0, totalDuration - 0.1));
+  if (newStart < 0.05) newStart = 0;
+
+  return { ...scene, start: Number(newStart.toFixed(3)), end };
+}
+
+/**
+ * Build action scenes for cinema mode: score windows, snap to cuts, clamp to
+ * safe edges and drop overlaps. When a lengthConfig is provided the window
+ * length follows the user's target scene length (clamped to
+ * ACTION_WINDOW_MIN_SEC..ACTION_WINDOW_MAX_SEC); without one the legacy
+ * fixed 15s window is used. Pure function.
+ */
+function buildActionScenes(energy, speechSegments, totalDuration, requested, lengthConfig = null) {
+  const targetRaw = Number(lengthConfig?.targetSec);
+  const windowSec = Number.isFinite(targetRaw) && targetRaw > 0
+    ? clamp(targetRaw, ACTION_WINDOW_MIN_SEC, ACTION_WINDOW_MAX_SEC)
+    : SCENE_WINDOW_SEC;
+
   const windows = scoreActionWindows(
     energy.loudnessIntervals,
     energy.sceneCuts,
     speechSegments,
     totalDuration,
-    Math.max(1, Math.ceil(requested * CANDIDATE_POOL_FACTOR))
+    Math.max(1, Math.ceil(requested * CANDIDATE_POOL_FACTOR)),
+    windowSec
   );
 
   const scenes = windows
@@ -241,7 +289,10 @@ function buildActionScenes(energy, speechSegments, totalDuration, requested) {
       start: clamp(s.start, EDGE_TRIM_SEC, Math.max(0, totalDuration - EDGE_TRIM_SEC)),
       end: clamp(s.end, 0, totalDuration)
     }))
-    .filter((s) => s.end - s.start >= Math.min(SCENE_WINDOW_SEC / 2, 7.5))
+    // Strong scenes are never dropped because of length: the floor only
+    // protects against degenerate slivers after snapping, scaled to the
+    // window size (legacy behaviour: min(15/2, 7.5)).
+    .filter((s) => s.end - s.start >= Math.min(windowSec / 2, 7.5))
     .sort((a, b) => a.start - b.start);
 
   const dedup = [];
@@ -322,14 +373,18 @@ module.exports = {
   MIN_LUFS_DELTA,
   MIN_CANDIDATE_GAP_SEC,
   SNAP_CUT_TOLERANCE_SEC,
+  DIALOGUE_SNAP_TOLERANCE_SEC,
   EDGE_TRIM_SEC,
   CANDIDATE_POOL_FACTOR,
   SCENE_CUT_SCORE_MIN,
   SCDET_FPS,
+  ACTION_WINDOW_MIN_SEC,
+  ACTION_WINDOW_MAX_SEC,
   parseEbur128,
   parseSceneCuts,
   scoreActionWindows,
   snapSceneToCuts,
+  snapDialogueSceneStart,
   buildActionScenes,
   analyzeMovieEnergy,
   buildCinemaChunkProfile,
@@ -338,6 +393,7 @@ module.exports = {
   normalizeActionScenes,
   scenesOverlap,
   buildCinemaSceneList,
+  applySceneEdits,
   writeSceneMetaFile
 };
 
@@ -389,7 +445,53 @@ function buildCinemaSceneList(llmScenes, actionCandidates, totalDuration) {
   const action = (Array.isArray(actionCandidates) ? actionCandidates : [])
     .filter((scene) => !llm.some((l) => scenesOverlap(l, scene, 1)));
 
-  return [...llm, ...action].sort((a, b) => a.start - b.start);
+  // Chronological renumbering: LLM and action scenes arrive with independent
+  // numbering (buildCinemaSceneList sorts by time afterwards), while the
+  // review screen, applySceneEdits and the meta files key scenes by index.
+  return [...llm, ...action]
+    .sort((a, b) => a.start - b.start)
+    .map((scene, i) => ({ ...scene, index: i + 1 }));
+}
+
+/**
+ * Apply user edits from the cinema review screen. edits maps scene index →
+ * { include?:boolean, start?:number, end?:number }. Invalid or missing
+ * entries leave the scene untouched; include:false removes the scene.
+ * Boundaries are clamped to the movie and must keep at least 1 sec of
+ * footage. Surviving scenes are renumbered chronologically. Pure function.
+ */
+function applySceneEdits(scenes, edits, totalDuration) {
+  const byIndex = new Map();
+  (Array.isArray(scenes) ? scenes : []).forEach((scene) => {
+    const idx = Number(scene?.index);
+    if (Number.isFinite(idx)) byIndex.set(idx, scene);
+  });
+
+  const limit = Number.isFinite(totalDuration) && totalDuration > 0 ? totalDuration : Infinity;
+
+  const edited = (Array.isArray(scenes) ? scenes : [])
+    .map((scene) => {
+      const edit = edits && typeof edits === 'object' ? edits[Number(scene?.index)] : null;
+      if (!edit) return { ...scene };
+
+      if (edit.include === false) return null;
+
+      const next = { ...scene };
+      const rawStart = Number(edit.start);
+      const rawEnd = Number(edit.end);
+      const start = Number.isFinite(rawStart) ? Math.max(0, Math.min(rawStart, limit)) : next.start;
+      const end = Number.isFinite(rawEnd) ? Math.max(0, Math.min(rawEnd, limit)) : next.end;
+      if (end > start + 0.999) {
+        next.start = Number(start.toFixed(3));
+        next.end = Number(end.toFixed(3));
+      }
+      return next;
+    })
+    .filter(Boolean);
+
+  return edited
+    .sort((a, b) => a.start - b.start)
+    .map((scene, i) => ({ ...scene, index: i + 1 }));
 }
 
 /**

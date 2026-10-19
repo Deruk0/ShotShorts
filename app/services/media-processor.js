@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const { createAbortError, runFfmpegCommand } = require('./cancellation');
 const { buildBannerFilterStrings, buildInterstitialFilterGraph, planInterstitialSegments, resolveDisplayDimensions, hasAlphaPixFmt } = require('./banner-utils');
+const { buildCinemaBgFilterGraph } = require('./cinema-bg-utils');
 
 const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.avi', '.mov', '.webm', '.m4v']);
 const SRT_STYLE_PRESETS = {
@@ -19,6 +20,7 @@ class MediaProcessor {
   constructor() {
     this.cancelled = false;
     this.activeCommands = new Set();
+    this.abortController = new AbortController();
     this._detectFfmpeg();
   }
 
@@ -54,6 +56,7 @@ class MediaProcessor {
 
   cancel() {
     this.cancelled = true;
+    this.abortController.abort();
     for (const cmd of this.activeCommands) {
       try { cmd.kill('SIGKILL'); } catch {}
     }
@@ -61,6 +64,7 @@ class MediaProcessor {
 
   reset() {
     this.cancelled = false;
+    this.abortController = new AbortController();
     this.activeCommands.clear();
   }
 
@@ -71,6 +75,7 @@ class MediaProcessor {
   _runCommand(cmd) {
     this._throwIfCancelled();
     return runFfmpegCommand(cmd, {
+      signal: this.abortController.signal,
       onStart: (activeCmd) => this.activeCommands.add(activeCmd),
       formatError: (e, stdout, stderr) => new Error(e.message + (stderr ? '\nstderr: ' + stderr : ''))
     }).finally(() => {
@@ -130,7 +135,10 @@ class MediaProcessor {
           }
         });
 
-    return this._runCommand(cmd).then(() => out);
+    return this._runCommand(cmd).then(() => out).catch((err) => {
+      try { fs.unlinkSync(out); } catch {}
+      throw err;
+    });
   }
 
   downsampleAudioForAI(inputAudio, onProgress) {
@@ -143,7 +151,10 @@ class MediaProcessor {
           }
         });
 
-    return this._runCommand(cmd).then(() => out);
+    return this._runCommand(cmd).then(() => out).catch((err) => {
+      try { fs.unlinkSync(out); } catch {}
+      throw err;
+    });
   }
 
 
@@ -171,6 +182,60 @@ class MediaProcessor {
     visit(folder);
     console.log(`[ShotShorts] Found ${videos.length} background video(s) in "${folder}" (including subfolders).`);
     return videos;
+  }
+
+  /**
+   * Randomly pick background videos until `targetDurationSec` is covered
+   * (shared by stories backgrounds and the cinema parallel-ADHD layer).
+   * The shuffled `bgContext.unused` queue is refilled from the usable pool
+   * when it runs dry, so short folders repeat clips without ever playing
+   * the same clip twice in a row. Durations are probed once and cached in
+   * `bgContext.durations`. Throws when not a single usable video exists.
+   */
+  async selectBackgroundVideos(bgContext, targetDurationSec) {
+    const maxSafetyDur = Math.max(0, Number(targetDurationSec) || 0);
+    const unusableBackgrounds = new Set();
+    const selected = [];
+    let totalDur = 0;
+
+    while (totalDur < maxSafetyDur) {
+      if (bgContext.unused.length === 0) {
+        const usableBackgrounds = bgContext.all.filter(bg => !unusableBackgrounds.has(bg));
+        if (usableBackgrounds.length === 0) break;
+        let nextBatch = [...usableBackgrounds].sort(() => Math.random() - 0.5);
+        if (selected.length > 0 && nextBatch[0] === selected[selected.length - 1] && nextBatch.length > 1) {
+          const temp = nextBatch[0];
+          nextBatch[0] = nextBatch[1];
+          nextBatch[1] = temp;
+        }
+        bgContext.unused = nextBatch;
+      }
+      const bg = bgContext.unused.shift();
+      try {
+        let d = bgContext.durations[bg];
+        if (d === undefined) {
+          d = await this.getVideoDuration(bg);
+          bgContext.durations[bg] = d;
+        }
+        if (d > 0) {
+          selected.push(bg);
+          totalDur += d;
+        } else {
+          unusableBackgrounds.add(bg);
+          console.warn(`[ShotShorts] Skipping background with invalid duration: ${bg}`);
+        }
+      } catch (err) {
+        unusableBackgrounds.add(bg);
+        console.warn(`[ShotShorts] Skipping unreadable background "${bg}": ${err.message}`);
+      }
+    }
+
+    this._throwIfCancelled();
+
+    if (selected.length === 0) {
+      throw new Error('No usable background videos found');
+    }
+    return { files: selected, totalDur };
   }
 
   getVideoDuration(file) {
@@ -253,65 +318,28 @@ class MediaProcessor {
 
     const duration = segment.end - segment.start;
     const safeTitle = this._sanitizeFileName(segment.title || `Story ${segment.index}`);
-    const outFileName = segment.partIndex
-      ? this._sanitizeFileName(`Part ${segment.partIndex} - ${safeTitle}.mp4`)
-      : this._sanitizeFileName(`${safeTitle}.mp4`);
-    const outFile = path.join(outputDir, outFileName);
+    const outputTitle = segment.partIndex ? `Part ${segment.partIndex} - ${safeTitle}` : safeTitle;
+    const outFile = this._getAvailableOutputPath(outputDir, outputTitle);
     const pId = segment.partIndex ? `${segment.index}_p${segment.partIndex}` : segment.index;
     const segAudio = path.join(os.tmpdir(), `ss_seg_${pId}_${Date.now()}.wav`);
 
-    // Cut segment audio
-    await this._runCommand(
-      ffmpeg(audioPath).setStartTime(segment.start).setDuration(duration)
-        .audioCodec('pcm_s16le').audioChannels(2).audioFrequency(44100).format('wav')
-        .output(segAudio)
-    );
-    this._throwIfCancelled();
+    let selection;
+    try {
+      // Cut segment audio
+      await this._runCommand(
+        ffmpeg(audioPath).setStartTime(segment.start).setDuration(duration)
+          .audioCodec('pcm_s16le').audioChannels(2).audioFrequency(44100).format('wav')
+          .output(segAudio)
+      );
+      this._throwIfCancelled();
 
-    // Build background list — add 5s safety margin to prevent video freezing
-    // before audio ends due to PTS rounding in concat filter
-    let totalDur = 0;
-    const selected = [];
-    const maxSafetyDur = duration + 5;
-    const unusableBackgrounds = new Set();
-
-    while (totalDur < maxSafetyDur) {
-      if (bgContext.unused.length === 0) {
-        const usableBackgrounds = bgContext.all.filter(bg => !unusableBackgrounds.has(bg));
-        if (usableBackgrounds.length === 0) break;
-        let nextBatch = [...usableBackgrounds].sort(() => Math.random() - 0.5);
-        if (selected.length > 0 && nextBatch[0] === selected[selected.length - 1] && nextBatch.length > 1) {
-          const temp = nextBatch[0];
-          nextBatch[0] = nextBatch[1];
-          nextBatch[1] = temp;
-        }
-        bgContext.unused = nextBatch;
-      }
-      const bg = bgContext.unused.shift();
-      try {
-        let d = bgContext.durations[bg];
-        if (d === undefined) {
-          d = await this.getVideoDuration(bg);
-          bgContext.durations[bg] = d;
-        }
-        if (d > 0) {
-          selected.push(bg);
-          totalDur += d;
-        } else {
-          unusableBackgrounds.add(bg);
-          console.warn(`[ShotShorts] Skipping background with invalid duration: ${bg}`);
-        }
-      } catch (err) {
-        unusableBackgrounds.add(bg);
-        console.warn(`[ShotShorts] Skipping unreadable background "${bg}": ${err.message}`);
-      }
+      // Add 5s safety margin to prevent freezing before audio ends.
+      selection = await this.selectBackgroundVideos(bgContext, duration + 5);
+    } catch (err) {
+      try { fs.unlinkSync(segAudio); } catch {}
+      throw err;
     }
-
-    this._throwIfCancelled();
-
-    if (selected.length === 0) {
-      throw new Error('No usable background videos found');
-    }
+    const { files: selected, totalDur } = selection;
 
     const msgTitle = segment.partIndex ? `"${segment.title}" (Part ${segment.partIndex})` : `"${segment.title}"`;
     onProgress?.({ step: `Rendering Story ${segment.index}`, percent: 0, message: `${msgTitle} (${Math.round(duration)}s)` });
@@ -336,6 +364,7 @@ class MediaProcessor {
     const isSubtitleVideo = subtitlePath && /\.(webm|mov)$/i.test(subtitlePath);
 
     // Merge
+    let renderComplete = false;
     try {
       // If total background duration is less than needed, concat will freeze last frame.
       // Use loop fallback instead to avoid frozen frames.
@@ -378,6 +407,7 @@ class MediaProcessor {
             bannerHasAudio: !!bannerOptions.bannerHasAudio,
             layout: bannerOptions.layout,
             opacity: bannerOptions.opacity,
+            chromaKey: bannerOptions.chromaKey,
             segments: interstitialPlanDef.segments
           })
           : null;
@@ -424,7 +454,7 @@ class MediaProcessor {
         // interstitial mode already composited its own [ivout] chain).
         if (bannerOptions && !interstitialPlan) {
           const bannerInputIndex = selected.length + 1 + (isSubtitleVideo ? 1 : 0);
-          filterStrings.push(...buildBannerFilterStrings(bannerInputIndex, bannerOptions.layout, 'vsub', 'vout', bannerOptions.opacity));
+          filterStrings.push(...buildBannerFilterStrings(bannerInputIndex, bannerOptions.layout, 'vsub', 'vout', bannerOptions.opacity, bannerOptions.chromaKey));
           console.log(`[ShotShorts] Applying banner: ${bannerOptions.path} at ${bannerOptions.layout.x},${bannerOptions.layout.y} ${bannerOptions.layout.width}x${bannerOptions.layout.height} opacity=${bannerOptions.opacity ?? 1}`);
         } else {
           filterStrings.push(`[vsub]null[vout]`);
@@ -453,6 +483,7 @@ class MediaProcessor {
 
         this._runCommand(cmd).then(res).catch(rej);
       });
+      renderComplete = true;
     } catch (concatError) {
       this._throwIfCancelled();
       onProgress?.({ step: `Rendering Story ${segment.index}`, percent: 0, message: `Concat failed, trying safe fallback...` });
@@ -471,6 +502,7 @@ class MediaProcessor {
             .output(safeSegAudio)
         );
       } catch (recreateErr) {
+        try { fs.unlinkSync(safeSegAudio); } catch {}
         throw new Error(`Failed to create segment audio: ${recreateErr.message}`);
       }
 
@@ -481,6 +513,7 @@ class MediaProcessor {
           throw new Error(`Segment audio file too small (${stats.size} bytes), likely corrupted or boundaries out of range`);
         }
       } catch (statErr) {
+        try { fs.unlinkSync(safeSegAudio); } catch {}
         throw new Error(`Cannot access segment audio file: ${statErr.message}`);
       }
 
@@ -508,6 +541,7 @@ class MediaProcessor {
               bannerHasAudio: !!bannerOptions.bannerHasAudio,
               layout: bannerOptions.layout,
               opacity: bannerOptions.opacity,
+              chromaKey: bannerOptions.chromaKey,
               segments: fallbackInterstitial.segments
             })
             : null;
@@ -553,7 +587,7 @@ class MediaProcessor {
 
           const audioMapIndex = isSubtitleVideo ? 2 : 1;
           if (bannerOptions && !fallbackPlan) {
-            fallbackFilters.push(...buildBannerFilterStrings(audioMapIndex + 1, bannerOptions.layout, 'vsub', 'vout', bannerOptions.opacity));
+            fallbackFilters.push(...buildBannerFilterStrings(audioMapIndex + 1, bannerOptions.layout, 'vsub', 'vout', bannerOptions.opacity, bannerOptions.chromaKey));
           } else {
             // With a fallbackPlan [vsub] already comes from [ivout] (either
             // via the subtitle burn or the null pass-through above).
@@ -588,11 +622,13 @@ class MediaProcessor {
             }
           });
         });
+        renderComplete = true;
       } finally {
         try { fs.unlinkSync(safeSegAudio); } catch {}
       }
     } finally {
       try { fs.unlinkSync(segAudio); } catch {}
+      if (!renderComplete) { try { fs.unlinkSync(outFile); } catch {} }
     }
 
     return outFile;
@@ -600,32 +636,45 @@ class MediaProcessor {
 
   /**
    * Cinema mode render: the movie's own frames become the 1080x1920 clip.
-   * No background videos are used. fillMode: 'crop' (center crop) or 'blur'
-   * (movie centered over a blurred zoomed backdrop).
+   * fillMode: 'crop' (center crop) or 'blur' (movie centered over a blurred
+   * zoomed backdrop).
+   *
+   * With options.cinemaBg the render becomes a parallel composite: canvas
+   * base → ADHD folder clips crop-filled into their rectangle (muted,
+   * chained) → movie excerpt crop/blur-filled into its own rectangle →
+   * subtitles → banner. Only the movie audio is ever mapped.
    */
   async assembleCinemaClip(segment, sourceVideoPath, outputDir, options, onProgress, subtitlePath = null, subtitleOptions = {}, bannerOptions = null) {
     this._throwIfCancelled();
 
     const fillMode = options?.fillMode === 'blur' ? 'blur' : 'crop';
+    // Parallel ADHD layer (cinema+bg mode): { files, totalDur, canvasFill,
+    // layerOrder, clipLayout, bgLayout } — see cinema-bg-utils.
+    const cinemaBg = options?.cinemaBg && Array.isArray(options.cinemaBg.files) && options.cinemaBg.files.length
+      ? options.cinemaBg
+      : null;
     const duration = segment.end - segment.start;
     const safeTitle = this._sanitizeFileName(segment.title || `Scene ${segment.index}`);
-    const outFileName = segment.partIndex
-      ? this._sanitizeFileName(`Part ${segment.partIndex} - ${safeTitle}.mp4`)
-      : this._sanitizeFileName(`${safeTitle}.mp4`);
-    const outFile = path.join(outputDir, outFileName);
+    const outputTitle = segment.partIndex ? `Part ${segment.partIndex} - ${safeTitle}` : safeTitle;
+    const outFile = this._getAvailableOutputPath(outputDir, outputTitle);
     const pId = segment.partIndex ? `${segment.index}_p${segment.partIndex}` : segment.index;
     const segAudio = path.join(os.tmpdir(), `ss_cinema_audio_${pId}_${Date.now()}.wav`);
 
     const msgTitle = segment.partIndex ? `"${segment.title}" (Part ${segment.partIndex})` : `"${segment.title}"`;
     onProgress?.({ step: `Rendering Scene ${segment.index}`, percent: 0, message: `${msgTitle} (${Math.round(duration)}s)` });
 
-    // Cut segment audio from the source movie.
-    await this._runCommand(
-      ffmpeg(sourceVideoPath).setStartTime(segment.start).setDuration(duration)
-        .audioCodec('pcm_s16le').audioChannels(2).audioFrequency(44100).format('wav')
-        .output(segAudio)
-    );
-    this._throwIfCancelled();
+    // Extraction can leave a partial WAV even when FFmpeg fails or is cancelled.
+    try {
+      await this._runCommand(
+        ffmpeg(sourceVideoPath).setStartTime(segment.start).setDuration(duration)
+          .audioCodec('pcm_s16le').audioChannels(2).audioFrequency(44100).format('wav')
+          .output(segAudio)
+      );
+      this._throwIfCancelled();
+    } catch (err) {
+      try { fs.unlinkSync(segAudio); } catch {}
+      throw err;
+    }
 
     const progressHandler = i => {
       let p = i.percent || 0;
@@ -645,81 +694,154 @@ class MediaProcessor {
 
     const isSubtitleVideo = subtitlePath && /\.(webm|mov)$/i.test(subtitlePath);
 
-    try {
-      await new Promise((res, rej) => {
-        // Input seeking (-ss before -i) is accurate when re-encoding and much
-        // faster than decoding from the beginning.
-        const cmd = ffmpeg(sourceVideoPath)
-          .inputOptions(['-ss', String(Math.max(0, segment.start))]);
-        cmd.input(segAudio);
-        if (isSubtitleVideo) cmd.input(subtitlePath);
+    // One ffmpeg command. Input order: movie (0, seeked with -ss before -i),
+    // segment audio (1), ADHD folder clips (2..), optional subtitle video,
+    // optional banner — the filter graph references these indexes.
+    // bgFiles === null keeps the plain cinema render exactly as before.
+    const buildRenderCommand = (bgFiles, bgLoop) => {
+      const bgCount = bgFiles ? bgFiles.length : 0;
+      // Input seeking (-ss before -i) is accurate when re-encoding and much
+      // faster than decoding from the beginning.
+      const cmd = ffmpeg(sourceVideoPath)
+        .inputOptions(['-ss', String(Math.max(0, segment.start))]);
+      cmd.input(segAudio);
+      if (bgFiles) {
+        // inputOptions() applies to the most recently added input, so the
+        // loop flag must be attached per file (loop mode uses a single file,
+        // but keep it correct for any count).
+        bgFiles.forEach((file) => {
+          cmd.input(file);
+          if (bgLoop) cmd.inputOptions(['-stream_loop', '-1']);
+        });
+      }
+      if (isSubtitleVideo) cmd.input(subtitlePath);
 
-        const filterStrings = [];
-        if (fillMode === 'blur') {
-          filterStrings.push(
-            '[0:v]setpts=PTS-STARTPTS,split=2[mvbg][mvfg];' +
-            '[mvbg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,gblur=sigma=30,eq=brightness=-0.06[mvbgb];' +
-            '[mvfg]scale=1080:1920:force_original_aspect_ratio=decrease[mvfgs];' +
-            '[mvbgb][mvfgs]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=30,format=yuv420p[mvscaled]'
-          );
+      const filterStrings = [];
+      let baseLabel;
+
+      if (bgFiles) {
+        const graph = buildCinemaBgFilterGraph({
+          fillMode,
+          canvasFill: cinemaBg.canvasFill,
+          layerOrder: cinemaBg.layerOrder,
+          clipLayout: cinemaBg.clipLayout,
+          bgLayout: cinemaBg.bgLayout,
+          bgCount,
+          bgIndexBase: 2,
+          movieIndex: 0,
+          durationSec: duration
+        });
+        filterStrings.push(...graph.filters);
+        baseLabel = graph.baseLabel;
+      } else if (fillMode === 'blur') {
+        filterStrings.push(
+          '[0:v]setpts=PTS-STARTPTS,split=2[mvbg][mvfg];' +
+          '[mvbg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,gblur=sigma=30,eq=brightness=-0.06[mvbgb];' +
+          '[mvfg]scale=1080:1920:force_original_aspect_ratio=decrease[mvfgs];' +
+          '[mvbgb][mvfgs]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=30,format=yuv420p[mvscaled]'
+        );
+        baseLabel = 'mvscaled';
+      } else {
+        filterStrings.push(
+          '[0:v]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,format=yuv420p[mvscaled]'
+        );
+        baseLabel = 'mvscaled';
+      }
+
+      // Burn-in subtitles if provided
+      if (subtitlePath) {
+        if (isSubtitleVideo) {
+          const subInputIndex = 2 + bgCount;
+          filterStrings.push(`[${baseLabel}][${subInputIndex}:v]overlay=0:0:eof_action=pass:format=yuv420[mvsub]`);
         } else {
-          filterStrings.push(
-            '[0:v]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,format=yuv420p[mvscaled]'
-          );
-        }
-
-        // Burn-in subtitles if provided
-        if (subtitlePath) {
-          if (isSubtitleVideo) {
-            filterStrings.push('[mvscaled][2:v]overlay=0:0:eof_action=pass:format=yuv420[mvsub]');
+          const escaped = this._escapeSubtitlePathForFilter(subtitlePath);
+          const ext = path.extname(subtitlePath).toLowerCase();
+          if (ext === '.ass') {
+            filterStrings.push(`[${baseLabel}]${this._buildAssFilterArgs(subtitlePath, subtitleOptions)}[mvsub]`);
           } else {
-            const escaped = this._escapeSubtitlePathForFilter(subtitlePath);
-            const ext = path.extname(subtitlePath).toLowerCase();
-            if (ext === '.ass') {
-              filterStrings.push(`[mvscaled]${this._buildAssFilterArgs(subtitlePath, subtitleOptions)}[mvsub]`);
-            } else {
-              const forceStyle = this._buildSrtForceStyle(subtitleOptions);
-              filterStrings.push(`[mvscaled]subtitles='${escaped}':charenc=UTF-8:force_style='${forceStyle}'[mvsub]`);
-            }
+            const forceStyle = this._buildSrtForceStyle(subtitleOptions);
+            filterStrings.push(`[${baseLabel}]subtitles='${escaped}':charenc=UTF-8:force_style='${forceStyle}'[mvsub]`);
           }
-        } else {
-          filterStrings.push('[mvscaled]null[mvsub]');
         }
+      } else {
+        filterStrings.push(`[${baseLabel}]null[mvsub]`);
+      }
 
-        if (bannerOptions && bannerOptions.path) {
-          const bannerInputIndex = 2 + (isSubtitleVideo ? 1 : 0);
-          cmd.input(bannerOptions.path);
-          if (!bannerOptions.isImage) cmd.inputOptions(['-stream_loop', '-1']);
-          filterStrings.push(...buildBannerFilterStrings(
-            bannerInputIndex,
-            bannerOptions.layout,
-            'mvsub',
-            'mvout',
-            bannerOptions.opacity
-          ));
-        } else {
-          filterStrings.push('[mvsub]null[mvout]');
+      if (bannerOptions && bannerOptions.path) {
+        const bannerInputIndex = 2 + bgCount + (isSubtitleVideo ? 1 : 0);
+        cmd.input(bannerOptions.path);
+        if (!bannerOptions.isImage) cmd.inputOptions(['-stream_loop', '-1']);
+        filterStrings.push(...buildBannerFilterStrings(
+          bannerInputIndex,
+          bannerOptions.layout,
+          'mvsub',
+          'mvout',
+          bannerOptions.opacity,
+          bannerOptions.chromaKey
+        ));
+      } else {
+        filterStrings.push('[mvsub]null[mvout]');
+      }
+
+      return cmd.complexFilter(filterStrings)
+        .outputOptions([
+          '-t', String(duration),
+          '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+          '-c:a', 'aac', '-b:a', '192k',
+          '-map', '[mvout]', '-map', '1:a:0',
+          '-shortest',
+          '-movflags', '+faststart'
+        ])
+        .output(outFile)
+        .on('progress', progressHandler);
+    };
+
+    try {
+      if (cinemaBg) {
+        // Chain random folder clips (stories-style selection) to cover the
+        // scene; when the folder holds less footage than the scene, loop a
+        // single clip instead of freezing the last frame.
+        let bgFiles = cinemaBg.files;
+        let bgLoop = false;
+        const totalBgDur = Number(cinemaBg.totalDur) || 0;
+        if (!(totalBgDur >= duration)) {
+          bgFiles = [bgFiles[0]];
+          bgLoop = true;
         }
-
-        cmd.complexFilter(filterStrings)
-          .outputOptions([
-            '-t', String(duration),
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-            '-c:a', 'aac', '-b:a', '192k',
-            '-map', '[mvout]', '-map', '1:a:0',
-            '-shortest',
-            '-movflags', '+faststart'
-          ])
-          .output(outFile)
-          .on('progress', progressHandler);
-
-        this._runCommand(cmd).then(res).catch(rej);
-      });
+        try {
+          await this._runCommand(buildRenderCommand(bgFiles, bgLoop));
+        } catch (err) {
+          this._throwIfCancelled();
+          // One of the chained ADHD clips failed to decode — retry once with
+          // a single looping clip (mirrors the stories-mode loop fallback).
+          onProgress?.({ step: `Rendering Scene ${segment.index}`, percent: 0, message: `${msgTitle} — ADHD chain failed (${err.message}). Retrying with a single looping clip…` });
+          await this._runCommand(buildRenderCommand([cinemaBg.files[0]], true));
+        }
+      } else {
+        await this._runCommand(buildRenderCommand(null, false));
+      }
+    } catch (err) {
+      try { fs.unlinkSync(outFile); } catch {}
+      throw err;
     } finally {
       try { fs.unlinkSync(segAudio); } catch {}
     }
 
     return outFile;
+  }
+
+  _getAvailableOutputPath(outputDir, title) {
+    const stem = this._sanitizeFileName(title);
+    let counter = 1;
+    let candidate;
+    do {
+      const suffix = counter === 1 ? '' : ` (${counter})`;
+      // Reserve space for the extension and collision suffix before truncating.
+      const base = this._sanitizeFileName(stem.slice(0, 180 - 4 - suffix.length));
+      candidate = path.join(outputDir, `${base}${suffix}.mp4`);
+      counter++;
+    } while (fs.existsSync(candidate));
+    return candidate;
   }
 
   _sanitizeFileName(name) {

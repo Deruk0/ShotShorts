@@ -16,6 +16,8 @@ let subtitlePreviewChunkIndex = 0;
 let bannerAspect = null;
 let bannerThumbnail = null;
 let etaEstimator = null;
+let reviewActive = false;       // cinema review screen is shown and waiting
+let reviewSubmitted = false;   // user already sent a decision, awaiting resume
 
 // ===== SMART ETA ESTIMATOR =====
 // Stage-weighted progress model with per-stage timing history, live upload
@@ -351,6 +353,18 @@ const DEFAULT_SETTINGS = {
   cinemaMaxSec: 90,
   cinemaMinSec: 20,
   cinemaMaxSecEnabled: true,
+  cinemaReviewEnabled: true,
+  cinemaBgEnabled: false,
+  cinemaBgCanvasFill: 'black',
+  cinemaBgLayerOrder: 'movieTop',
+  cinemaClipX: 0,
+  cinemaClipY: 0,
+  cinemaClipWidth: 1080,
+  cinemaClipHeight: 960,
+  cinemaBgX: 0,
+  cinemaBgY: 960,
+  cinemaBgWidth: 1080,
+  cinemaBgHeight: 960,
   storiesTargetMinSec: 90,
   storiesTargetMaxSec: 300,
   storiesHardMinSec: 60,
@@ -379,6 +393,7 @@ const DEFAULT_SETTINGS = {
   bannerWidth: 300,
   bannerHeight: 150,
   bannerOpacity: 100,
+  bannerChromaKey: false,
   bannerMode: 'overlay',
   bannerIntervalSec: 60,
   customProviders: [],
@@ -400,6 +415,18 @@ const PRESET_SETTING_KEYS = [
   'cinemaMaxSec',
   'cinemaMinSec',
   'cinemaMaxSecEnabled',
+  'cinemaReviewEnabled',
+  'cinemaBgEnabled',
+  'cinemaBgCanvasFill',
+  'cinemaBgLayerOrder',
+  'cinemaClipX',
+  'cinemaClipY',
+  'cinemaClipWidth',
+  'cinemaClipHeight',
+  'cinemaBgX',
+  'cinemaBgY',
+  'cinemaBgWidth',
+  'cinemaBgHeight',
   'storiesTargetMinSec',
   'storiesTargetMaxSec',
   'storiesHardMinSec',
@@ -428,6 +455,7 @@ const PRESET_SETTING_KEYS = [
   'bannerWidth',
   'bannerHeight',
   'bannerOpacity',
+  'bannerChromaKey',
   'bannerMode',
   'bannerIntervalSec',
   'customProviders',
@@ -538,6 +566,33 @@ const I18N = {
       cinemaMinLabel: 'Min Length (sec)',
       cinemaMaxEnabledLabel: 'Limit max scene length',
       cinemaLengthHint: 'Length values guide the AI when it picks scenes; strong scenes are never cut or dropped because of their length.',
+      cinemaReviewEnabledLabel: 'Review scenes before render',
+      cinemaReviewTitle: 'Review Scenes',
+      cinemaReviewHint: 'Uncheck scenes you don\'t want, adjust their boundaries, then render.',
+      cinemaReviewRenderBtn: 'Render Selected',
+      cinemaReviewCancelBtn: 'Cancel Run',
+      cinemaReviewSourceDialogue: 'Dialogue',
+      cinemaReviewSourceAction: 'Action',
+      cinemaReviewStartLabel: 'Start (sec)',
+      cinemaReviewEndLabel: 'End (sec)',
+      cinemaReviewIncludeLabel: 'Include this scene',
+      cinemaBgEnabledLabel: 'ADHD clip in parallel',
+      cinemaBgCanvasFillLabel: 'Empty Space Fill',
+      cinemaBgCanvasBlack: 'Black',
+      cinemaBgCanvasBlurMovie: 'Blurred movie frame',
+      cinemaBgCanvasBlurBg: 'Blurred ADHD frame',
+      cinemaBgLayerOrderLabel: 'On Top',
+      cinemaBgLayerMovieTop: 'Movie over ADHD',
+      cinemaBgLayerBgTop: 'ADHD over movie',
+      cinemaClipWidthLabel: 'Movie Width (px)',
+      cinemaClipHeightLabel: 'Movie Height (px)',
+      cinemaBgWidthLabel: 'ADHD Width (px)',
+      cinemaBgHeightLabel: 'ADHD Height (px)',
+      cinemaBgResetLayoutBtn: 'Reset Layout',
+      cinemaBgLayoutHint: 'The movie excerpt and the ADHD clip play in parallel, each in its own rectangle. Drag and stretch both rectangles in the live preview below (Transcript & Subtitles). The ADHD clips come from the background videos folder (Generator tab), play one after another without sound. Vertical Frame applies inside the movie rectangle.',
+      cinemaPreviewMovieCaption: 'Movie',
+      cinemaPreviewBgCaption: 'ADHD',
+      previewDragHintCinema: 'movie & ADHD: drag to move · handles to resize',
       storiesSectionTitle: 'Stories Mode',
       storiesSettingsHint: 'These options apply when the Generator is switched to Stories mode.',
       storiesTargetMinLabel: 'Target Min Length (sec)',
@@ -636,6 +691,8 @@ const I18N = {
       bannerWidth: 'Width (px)',
       bannerHeight: 'Height (px)',
       bannerOpacity: 'Visibility',
+      bannerChromaKey: 'Auto chroma key: green background',
+      bannerChromaHint: 'Removes green automatically when enabled, including green details inside the banner.',
       bannerMode: 'Show Mode',
       bannerModeOverlay: 'Always visible (overlay)',
       bannerModeInterstitial: 'Pause video & play banner with sound',
@@ -680,6 +737,33 @@ const I18N = {
       cinemaMinLabel: 'Мин. длина (сек)',
       cinemaMaxEnabledLabel: 'Ограничивать макс. длину сцены',
       cinemaLengthHint: 'Значения длины — подсказка для ИИ при отборе сцен; сильные сцены никогда не режутся и не отбрасываются из-за длины.',
+      cinemaReviewEnabledLabel: 'Просмотр сцен перед рендером',
+      cinemaReviewTitle: 'Просмотр сцен',
+      cinemaReviewHint: 'Сними галочку с ненужных сцен, подвинь их границы и запусти рендер.',
+      cinemaReviewRenderBtn: 'Рендерить выбранные',
+      cinemaReviewCancelBtn: 'Отменить прогон',
+      cinemaReviewSourceDialogue: 'Диалог',
+      cinemaReviewSourceAction: 'Экшн',
+      cinemaReviewStartLabel: 'Начало (сек)',
+      cinemaReviewEndLabel: 'Конец (сек)',
+      cinemaReviewIncludeLabel: 'Включить сцену',
+      cinemaBgEnabledLabel: 'СДВГ-ролик параллельно',
+      cinemaBgCanvasFillLabel: 'Заполнение пустого места',
+      cinemaBgCanvasBlack: 'Чёрный',
+      cinemaBgCanvasBlurMovie: 'Размытый кадр фильма',
+      cinemaBgCanvasBlurBg: 'Размытый СДВГ-кадр',
+      cinemaBgLayerOrderLabel: 'Сверху',
+      cinemaBgLayerMovieTop: 'Фильм поверх СДВГ',
+      cinemaBgLayerBgTop: 'СДВГ поверх фильма',
+      cinemaClipWidthLabel: 'Ширина фильма (px)',
+      cinemaClipHeightLabel: 'Высота фильма (px)',
+      cinemaBgWidthLabel: 'Ширина СДВГ (px)',
+      cinemaBgHeightLabel: 'Высота СДВГ (px)',
+      cinemaBgResetLayoutBtn: 'Сбросить раскладку',
+      cinemaBgLayoutHint: 'Отрывок фильма и СДВГ-ролик идут параллельно, каждый в своём прямоугольнике. Тащи и растягивай оба прямоугольника в живом превью ниже (раздел «Транскрибация и субтитры»). СДВГ-ролики берутся из папки фоновых видео (вкладка «Генератор»), сменяют друг друга и играют без звука. «Вертикальный кадр» применяется внутри прямоугольника фильма.',
+      cinemaPreviewMovieCaption: 'Фильм',
+      cinemaPreviewBgCaption: 'СДВГ',
+      previewDragHintCinema: 'фильм и СДВГ: тащи чтобы двигать · точки чтобы растянуть',
       storiesSectionTitle: 'Режим историй',
       storiesSettingsHint: 'Эти настройки применяются, когда в Генераторе включён режим «Истории».',
       storiesTargetMinLabel: 'Целевой мин. (сек)',
@@ -778,6 +862,8 @@ const I18N = {
       bannerWidth: 'Ширина (px)',
       bannerHeight: 'Высота (px)',
       bannerOpacity: 'Видимость',
+      bannerChromaKey: 'Автохромакей: зелёный фон',
+      bannerChromaHint: 'После включения зелёный удаляется автоматически, включая зелёные детали внутри баннера.',
       bannerMode: 'Режим показа',
       bannerModeOverlay: 'Всегда виден (поверх)',
       bannerModeInterstitial: 'Пауза ролика и баннер со звуком',
@@ -808,6 +894,8 @@ function t(path) {
 }
 
 function applyTranslations() {
+  window.TikTokQueuePanel?.setLanguage(uiLang);
+  window.TikTokPanel?.setLanguage(uiLang);
   const tabs = $$('.nav-tab');
   if (tabs[0]) tabs[0].textContent = t('tabs.generator');
   if (tabs[1]) tabs[1].textContent = t('tabs.settings');
@@ -831,6 +919,11 @@ function applyTranslations() {
   const cinemaMinLabel = $('#txt-cinema-min-label'); if (cinemaMinLabel) cinemaMinLabel.textContent = t('labels.cinemaMinLabel');
   const cinemaMaxEnabledLabel = $('#txt-cinema-max-enabled-label'); if (cinemaMaxEnabledLabel) cinemaMaxEnabledLabel.textContent = t('labels.cinemaMaxEnabledLabel');
   const cinemaLengthHint = $('#cinema-length-hint'); if (cinemaLengthHint) cinemaLengthHint.textContent = t('labels.cinemaLengthHint');
+  const cinemaReviewEnabledLabel = $('#txt-cinema-review-enabled-label'); if (cinemaReviewEnabledLabel) cinemaReviewEnabledLabel.textContent = t('labels.cinemaReviewEnabledLabel');
+  const cinemaReviewTitle = $('#txt-cinema-review-title'); if (cinemaReviewTitle) cinemaReviewTitle.textContent = t('labels.cinemaReviewTitle');
+  const cinemaReviewHint = $('#cinema-review-hint'); if (cinemaReviewHint) cinemaReviewHint.textContent = t('labels.cinemaReviewHint');
+  const reviewRenderBtn = $('#btn-review-render'); if (reviewRenderBtn) reviewRenderBtn.textContent = t('labels.cinemaReviewRenderBtn');
+  const reviewCancelBtn = $('#btn-review-cancel'); if (reviewCancelBtn) reviewCancelBtn.textContent = t('labels.cinemaReviewCancelBtn');
   const storiesSectionTitle = $('#txt-stories-title'); if (storiesSectionTitle) storiesSectionTitle.textContent = t('labels.storiesSectionTitle');
   const storiesSettingsHint = $('#stories-settings-hint'); if (storiesSettingsHint) storiesSettingsHint.textContent = t('labels.storiesSettingsHint');
   const storiesTargetMinLabel = $('#txt-stories-target-min-label'); if (storiesTargetMinLabel) storiesTargetMinLabel.textContent = t('labels.storiesTargetMinLabel');
@@ -847,6 +940,33 @@ function applyTranslations() {
       if (option.value === 'blur') option.textContent = t('labels.cinemaFillBlur');
     });
   }
+  const cinemaBgEnabledLabel = $('#txt-cinema-bg-enabled'); if (cinemaBgEnabledLabel) cinemaBgEnabledLabel.textContent = t('labels.cinemaBgEnabledLabel');
+  const cinemaBgCanvasFillLabel = $('#txt-cinema-bg-canvas-fill'); if (cinemaBgCanvasFillLabel) cinemaBgCanvasFillLabel.textContent = t('labels.cinemaBgCanvasFillLabel');
+  const cinemaBgCanvasSelect = $('#cinema-bg-canvas-fill');
+  if (cinemaBgCanvasSelect) {
+    [...cinemaBgCanvasSelect.options].forEach((option) => {
+      if (option.value === 'black') option.textContent = t('labels.cinemaBgCanvasBlack');
+      if (option.value === 'blurMovie') option.textContent = t('labels.cinemaBgCanvasBlurMovie');
+      if (option.value === 'blurBg') option.textContent = t('labels.cinemaBgCanvasBlurBg');
+    });
+  }
+  const cinemaBgLayerOrderLabel = $('#txt-cinema-bg-layer-order'); if (cinemaBgLayerOrderLabel) cinemaBgLayerOrderLabel.textContent = t('labels.cinemaBgLayerOrderLabel');
+  const cinemaBgLayerSelect = $('#cinema-bg-layer-order');
+  if (cinemaBgLayerSelect) {
+    [...cinemaBgLayerSelect.options].forEach((option) => {
+      if (option.value === 'movieTop') option.textContent = t('labels.cinemaBgLayerMovieTop');
+      if (option.value === 'bgTop') option.textContent = t('labels.cinemaBgLayerBgTop');
+    });
+  }
+  const cinemaClipWidthLabel = $('#txt-cinema-clip-width'); if (cinemaClipWidthLabel) cinemaClipWidthLabel.textContent = t('labels.cinemaClipWidthLabel');
+  const cinemaClipHeightLabel = $('#txt-cinema-clip-height'); if (cinemaClipHeightLabel) cinemaClipHeightLabel.textContent = t('labels.cinemaClipHeightLabel');
+  const cinemaBgWidthLabel = $('#txt-cinema-bg-width'); if (cinemaBgWidthLabel) cinemaBgWidthLabel.textContent = t('labels.cinemaBgWidthLabel');
+  const cinemaBgHeightLabel = $('#txt-cinema-bg-height'); if (cinemaBgHeightLabel) cinemaBgHeightLabel.textContent = t('labels.cinemaBgHeightLabel');
+  const cinemaBgResetBtn = $('#btn-reset-cinema-bg-layout'); if (cinemaBgResetBtn) cinemaBgResetBtn.textContent = t('labels.cinemaBgResetLayoutBtn');
+  const cinemaBgLayoutHint = $('#cinema-bg-layout-hint'); if (cinemaBgLayoutHint) cinemaBgLayoutHint.textContent = t('labels.cinemaBgLayoutHint');
+  const cinemaMovieCaption = $('#cinema-clip-preview-caption'); if (cinemaMovieCaption) cinemaMovieCaption.textContent = t('labels.cinemaPreviewMovieCaption');
+  const cinemaBgCaption = $('#cinema-bg-preview-caption'); if (cinemaBgCaption) cinemaBgCaption.textContent = t('labels.cinemaPreviewBgCaption');
+  const cinemaDragHint = $('#preview-drag-hint-cinema'); if (cinemaDragHint) cinemaDragHint.textContent = t('labels.previewDragHintCinema');
   const sTitle = $('#txt-source-title'); if (sTitle) sTitle.textContent = t('labels.sourceTitle');
   const bTitle = $('#txt-bg-title'); if (bTitle) bTitle.textContent = t('labels.bgTitle');
   const oTitle = $('#txt-output-title'); if (oTitle) oTitle.textContent = t('labels.outputTitle');
@@ -936,6 +1056,8 @@ function applyTranslations() {
   const eb = $('#txt-enable-banner'); if (eb) eb.textContent = t('labels.enable');
   const bw = $('#txt-banner-width'); if (bw) bw.textContent = t('labels.bannerWidth');
   const bhl = $('#txt-banner-height'); if (bhl) bhl.textContent = t('labels.bannerHeight');
+  $('#txt-banner-chroma-key').textContent = t('labels.bannerChromaKey');
+  $('#txt-banner-chroma-hint').textContent = t('labels.bannerChromaHint');
   const bop = $('#txt-banner-opacity'); if (bop) bop.textContent = t('labels.bannerOpacity');
   const bmd = $('#txt-banner-mode'); if (bmd) bmd.textContent = t('labels.bannerMode');
   const bin = $('#txt-banner-interval'); if (bin) bin.textContent = t('labels.bannerInterval');
@@ -1020,6 +1142,16 @@ function syncSettingsFromControls() {
     if ($('#cinema-min-sec')) {
       settings.cinemaMinSec = clampCinemaMin($('#cinema-min-sec').value);
       settings.cinemaMaxSecEnabled = $('#cinema-max-enabled')?.checked !== false;
+      settings.cinemaReviewEnabled = $('#cinema-review-enabled')?.checked !== false;
+    }
+    if ($('#cinema-bg-toggle')) {
+      settings.cinemaBgEnabled = $('#cinema-bg-toggle').checked === true;
+      settings.cinemaBgCanvasFill = normalizeCinemaBgCanvasFillLocal($('#cinema-bg-canvas-fill')?.value);
+      settings.cinemaBgLayerOrder = normalizeCinemaBgLayerOrderLocal($('#cinema-bg-layer-order')?.value);
+      settings.cinemaClipWidth = clampBannerSize($('#cinema-clip-width')?.value || 1080, BANNER_MAX_WIDTH);
+      settings.cinemaClipHeight = clampBannerSize($('#cinema-clip-height')?.value || 960, BANNER_MAX_HEIGHT);
+      settings.cinemaBgWidth = clampBannerSize($('#cinema-bg-width')?.value || 1080, BANNER_MAX_WIDTH);
+      settings.cinemaBgHeight = clampBannerSize($('#cinema-bg-height')?.value || 960, BANNER_MAX_HEIGHT);
     }
     if ($('#stories-target-min-sec')) {
       Object.assign(settings, {
@@ -1074,6 +1206,7 @@ function syncSettingsFromControls() {
     settings.bannerEnabled = !!$('#banner-toggle').checked;
     settings.bannerWidth = Number($('#banner-width').value || 300);
     settings.bannerHeight = Number($('#banner-height').value || 150);
+    settings.bannerChromaKey = $('#banner-chroma-key').checked;
     settings.bannerOpacity = clampBannerOpacity($('#banner-opacity').value);
     settings.bannerMode = $('#banner-mode')?.value === 'interstitial' ? 'interstitial' : 'overlay';
     settings.bannerIntervalSec = clampBannerSeconds($('#banner-interval-sec').value, 60, 5, 3600);
@@ -1146,6 +1279,23 @@ function syncSettingsToControls() {
   $('#cinema-max-enabled').checked = settings.cinemaMaxSecEnabled;
   $('#cinema-max-sec').disabled = !settings.cinemaMaxSecEnabled;
   $('#cinema-max-field').style.opacity = settings.cinemaMaxSecEnabled ? '1' : '0.4';
+  settings.cinemaReviewEnabled = settings.cinemaReviewEnabled !== false;
+  $('#cinema-review-enabled').checked = settings.cinemaReviewEnabled;
+  settings.cinemaBgEnabled = settings.cinemaBgEnabled === true;
+  $('#cinema-bg-toggle').checked = settings.cinemaBgEnabled;
+  setCinemaBgFieldsExpanded(settings.cinemaBgEnabled);
+  settings.cinemaBgCanvasFill = normalizeCinemaBgCanvasFillLocal(settings.cinemaBgCanvasFill);
+  $('#cinema-bg-canvas-fill').value = settings.cinemaBgCanvasFill;
+  settings.cinemaBgLayerOrder = normalizeCinemaBgLayerOrderLocal(settings.cinemaBgLayerOrder);
+  $('#cinema-bg-layer-order').value = settings.cinemaBgLayerOrder;
+  settings.cinemaClipWidth = clampBannerSize(settings.cinemaClipWidth || 1080, BANNER_MAX_WIDTH);
+  settings.cinemaClipHeight = clampBannerSize(settings.cinemaClipHeight || 960, BANNER_MAX_HEIGHT);
+  $('#cinema-clip-width').value = String(settings.cinemaClipWidth);
+  $('#cinema-clip-height').value = String(settings.cinemaClipHeight);
+  settings.cinemaBgWidth = clampBannerSize(settings.cinemaBgWidth || 1080, BANNER_MAX_WIDTH);
+  settings.cinemaBgHeight = clampBannerSize(settings.cinemaBgHeight || 960, BANNER_MAX_HEIGHT);
+  $('#cinema-bg-width').value = String(settings.cinemaBgWidth);
+  $('#cinema-bg-height').value = String(settings.cinemaBgHeight);
   const normalizedStories = normalizeStoriesLength(settings);
   Object.assign(settings, {
     storiesHardMinSec: normalizedStories.hardMin,
@@ -1189,6 +1339,7 @@ function syncSettingsToControls() {
   setBannerFieldsExpanded(!!settings.bannerEnabled);
   $('#banner-width').value = String(settings.bannerWidth || 300);
   $('#banner-height').value = String(settings.bannerHeight || 150);
+  $('#banner-chroma-key').checked = settings.bannerChromaKey === true;
   $('#banner-opacity').value = String(clampBannerOpacity(settings.bannerOpacity));
   $('#banner-opacity-value').textContent = `${Math.round(clampBannerOpacity(settings.bannerOpacity))}%`;
   $('#banner-mode').value = ['overlay', 'interstitial'].includes(settings.bannerMode) ? settings.bannerMode : 'overlay';
@@ -1367,6 +1518,9 @@ $$('.nav-tab').forEach(tab => {
     const target = tab.dataset.tab;
     $('#tab-generator').style.display = target === 'generator' ? '' : 'none';
     $('#tab-settings').style.display = target === 'settings' ? '' : 'none';
+    $('#tab-tiktok').style.display = target === 'tiktok' ? '' : 'none';
+    if (target === 'tiktok') window.TikTokPanel?.refresh();
+    if (target === 'tiktok') window.TikTokQueuePanel?.refresh();
     // The Settings tab is hidden at startup, so preview stage sizes are 0
     // until it is opened for the first time — rescale once it becomes visible.
     if (target === 'settings') syncSharedPreviewFrame();
@@ -1415,16 +1569,17 @@ function applyGenerationModeUi() {
   // footage goes into the output clips.
   const sceneCountField = $('#cinema-scene-count-field');
   if (sceneCountField) sceneCountField.style.display = isCinema ? '' : 'none';
-  // Background videos are a stories-only setting: cinema mode renders the
-  // movie's own frames, so the picker is irrelevant there.
+  // Background videos serve stories mode AND cinema mode with the parallel
+  // ADHD layer enabled; plain cinema renders the movie's own frames only.
   const bgSection = $('#bg-section');
-  if (bgSection) bgSection.style.display = isCinema ? 'none' : '';
+  if (bgSection) bgSection.style.display = (!isCinema || settings.cinemaBgEnabled === true) ? '' : 'none';
   // Each mode's settings section is visible only when that mode is active —
   // no duplicated length controls from the other mode.
   const storiesSection = $('#stories-length-section');
   if (storiesSection) storiesSection.style.display = isCinema ? 'none' : '';
   const cinemaSection = $('#cinema-length-section');
   if (cinemaSection) cinemaSection.style.display = isCinema ? '' : 'none';
+  updateCinemaBgPreview();
   syncActivePresetIdAlias();
   renderPresets();
   updateGenerateBtn();
@@ -1455,6 +1610,256 @@ $('#cinema-fill-mode').addEventListener('change', () => {
   settings.cinemaFillMode = $('#cinema-fill-mode').value === 'blur' ? 'blur' : 'crop';
   saveSettings();
 });
+
+// ===== SETTINGS: CINEMA ADHD PARALLEL CLIP =====
+const CINEMA_BG_CANVAS_FILLS = ['black', 'blurMovie', 'blurBg'];
+
+function normalizeCinemaBgCanvasFillLocal(value) {
+  return CINEMA_BG_CANVAS_FILLS.includes(value) ? value : 'black';
+}
+
+function normalizeCinemaBgLayerOrderLocal(value) {
+  return value === 'bgTop' ? 'bgTop' : 'movieTop';
+}
+
+function setCinemaBgFieldsExpanded(on) {
+  const fields = $('#cinema-bg-fields');
+  if (!fields) return;
+  fields.style.opacity = on ? '1' : '0.4';
+  fields.style.pointerEvents = on ? 'auto' : 'none';
+  setContainerControlsDisabled('#cinema-bg-fields', !on);
+}
+
+function isCinemaBgActive() {
+  return currentGenerationMode() === 'cinema' && settings.cinemaBgEnabled === true;
+}
+
+// Position both rectangles in the shared 1080x1920 preview frame; the same
+// coordinates are sent to the render pipeline (preview == exported frame).
+function updateCinemaBgPreview() {
+  const clipItem = $('#cinema-clip-preview-item');
+  const bgItem = $('#cinema-bg-preview-item');
+  if (!clipItem || !bgItem) return;
+
+  const active = isCinemaBgActive();
+  clipItem.style.display = active ? '' : 'none';
+  bgItem.style.display = active ? '' : 'none';
+  if (!active) {
+    syncSharedPreviewFrame();
+    return;
+  }
+
+  const clipWidth = clampBannerSize(settings.cinemaClipWidth || 1080, BANNER_MAX_WIDTH);
+  const clipHeight = clampBannerSize(settings.cinemaClipHeight || 960, BANNER_MAX_HEIGHT);
+  const clipPos = clampBannerPos(settings.cinemaClipX, settings.cinemaClipY, clipWidth, clipHeight);
+  clipItem.style.left = `${clipPos.x}px`;
+  clipItem.style.top = `${clipPos.y}px`;
+  clipItem.style.width = `${clipWidth}px`;
+  clipItem.style.height = `${clipHeight}px`;
+
+  const bgWidth = clampBannerSize(settings.cinemaBgWidth || 1080, BANNER_MAX_WIDTH);
+  const bgHeight = clampBannerSize(settings.cinemaBgHeight || 960, BANNER_MAX_HEIGHT);
+  const bgPos = clampBannerPos(settings.cinemaBgX, settings.cinemaBgY, bgWidth, bgHeight);
+  bgItem.style.left = `${bgPos.x}px`;
+  bgItem.style.top = `${bgPos.y}px`;
+  bgItem.style.width = `${bgWidth}px`;
+  bgItem.style.height = `${bgHeight}px`;
+
+  // The top layer must stay grabbable when the rectangles overlap.
+  const movieTop = normalizeCinemaBgLayerOrderLocal(settings.cinemaBgLayerOrder) === 'movieTop';
+  clipItem.classList.toggle('order-top', movieTop);
+  bgItem.classList.toggle('order-top', !movieTop);
+
+  syncCinemaBgSizeInputs();
+  syncSharedPreviewFrame();
+}
+
+function syncCinemaBgSizeInputs() {
+  const clipW = $('#cinema-clip-width');
+  if (clipW) clipW.value = String(clampBannerSize(settings.cinemaClipWidth || 1080, BANNER_MAX_WIDTH));
+  const clipH = $('#cinema-clip-height');
+  if (clipH) clipH.value = String(clampBannerSize(settings.cinemaClipHeight || 960, BANNER_MAX_HEIGHT));
+  const bgW = $('#cinema-bg-width');
+  if (bgW) bgW.value = String(clampBannerSize(settings.cinemaBgWidth || 1080, BANNER_MAX_WIDTH));
+  const bgH = $('#cinema-bg-height');
+  if (bgH) bgH.value = String(clampBannerSize(settings.cinemaBgHeight || 960, BANNER_MAX_HEIGHT));
+}
+
+function resetCinemaBgLayout() {
+  settings.cinemaClipX = 0;
+  settings.cinemaClipY = 0;
+  settings.cinemaClipWidth = 1080;
+  settings.cinemaClipHeight = 960;
+  settings.cinemaBgX = 0;
+  settings.cinemaBgY = 960;
+  settings.cinemaBgWidth = 1080;
+  settings.cinemaBgHeight = 960;
+  updateCinemaBgPreview();
+  saveSettings();
+}
+
+$('#cinema-bg-toggle').addEventListener('change', () => {
+  const on = $('#cinema-bg-toggle').checked;
+  setCinemaBgFieldsExpanded(on);
+  settings.cinemaBgEnabled = on;
+  // Toggles the background-folder requirement and the preview rectangles.
+  applyGenerationModeUi();
+  saveSettings();
+});
+
+$('#cinema-bg-canvas-fill').addEventListener('change', () => {
+  settings.cinemaBgCanvasFill = normalizeCinemaBgCanvasFillLocal($('#cinema-bg-canvas-fill').value);
+  saveSettings();
+});
+
+$('#cinema-bg-layer-order').addEventListener('change', () => {
+  settings.cinemaBgLayerOrder = normalizeCinemaBgLayerOrderLocal($('#cinema-bg-layer-order').value);
+  updateCinemaBgPreview();
+  saveSettings();
+});
+
+// Size inputs mirror the banner width/height fields: drag also updates them.
+$('#cinema-clip-width').addEventListener('input', () => {
+  const raw = Number($('#cinema-clip-width').value || 0);
+  if (!Number.isFinite(raw) || raw <= 0) return;
+  const width = clampBannerSize(raw, BANNER_MAX_WIDTH);
+  const height = clampBannerSize(settings.cinemaClipHeight || 960, BANNER_MAX_HEIGHT);
+  const pos = clampBannerPos(settings.cinemaClipX, settings.cinemaClipY, width, height);
+  settings.cinemaClipWidth = width;
+  settings.cinemaClipHeight = height;
+  settings.cinemaClipX = pos.x;
+  settings.cinemaClipY = pos.y;
+  updateCinemaBgPreview();
+  saveSettings();
+});
+
+$('#cinema-clip-height').addEventListener('input', () => {
+  const raw = Number($('#cinema-clip-height').value || 0);
+  if (!Number.isFinite(raw) || raw <= 0) return;
+  const width = clampBannerSize(settings.cinemaClipWidth || 1080, BANNER_MAX_WIDTH);
+  const height = clampBannerSize(raw, BANNER_MAX_HEIGHT);
+  const pos = clampBannerPos(settings.cinemaClipX, settings.cinemaClipY, width, height);
+  settings.cinemaClipWidth = width;
+  settings.cinemaClipHeight = height;
+  settings.cinemaClipX = pos.x;
+  settings.cinemaClipY = pos.y;
+  updateCinemaBgPreview();
+  saveSettings();
+});
+
+$('#cinema-bg-width').addEventListener('input', () => {
+  const raw = Number($('#cinema-bg-width').value || 0);
+  if (!Number.isFinite(raw) || raw <= 0) return;
+  const width = clampBannerSize(raw, BANNER_MAX_WIDTH);
+  const height = clampBannerSize(settings.cinemaBgHeight || 960, BANNER_MAX_HEIGHT);
+  const pos = clampBannerPos(settings.cinemaBgX, settings.cinemaBgY, width, height);
+  settings.cinemaBgWidth = width;
+  settings.cinemaBgHeight = height;
+  settings.cinemaBgX = pos.x;
+  settings.cinemaBgY = pos.y;
+  updateCinemaBgPreview();
+  saveSettings();
+});
+
+$('#cinema-bg-height').addEventListener('input', () => {
+  const raw = Number($('#cinema-bg-height').value || 0);
+  if (!Number.isFinite(raw) || raw <= 0) return;
+  const width = clampBannerSize(settings.cinemaBgWidth || 1080, BANNER_MAX_WIDTH);
+  const height = clampBannerSize(raw, BANNER_MAX_HEIGHT);
+  const pos = clampBannerPos(settings.cinemaBgX, settings.cinemaBgY, width, height);
+  settings.cinemaBgWidth = width;
+  settings.cinemaBgHeight = height;
+  settings.cinemaBgX = pos.x;
+  settings.cinemaBgY = pos.y;
+  updateCinemaBgPreview();
+  saveSettings();
+});
+
+$('#btn-reset-cinema-bg-layout').addEventListener('click', () => {
+  resetCinemaBgLayout();
+});
+
+// Drag/resize for one preview rectangle (banner-style move + e/s/se handles,
+// snap guides, min-visible clamp). The corner handle stretches both axes
+// independently — layout regions have no aspect lock.
+function makeCinemaRectDraggable(itemId, readRect, writeRect) {
+  const item = $(itemId);
+  if (!item) return;
+  let dragState = null;
+
+  item.addEventListener('pointerdown', (e) => {
+    if (!isCinemaBgActive()) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const handle = e.target.closest ? e.target.closest('.banner-handle') : null;
+    const scale = bannerPreviewScale() || 1;
+    const orig = readRect();
+    dragState = {
+      mode: handle ? 'resize' : 'move',
+      axis: handle ? (handle.dataset.axis || 'se') : null,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: Number(orig.x) || 0,
+      origY: Number(orig.y) || 0,
+      origWidth: Number(orig.width) || 100,
+      origHeight: Number(orig.height) || 100,
+      scale
+    };
+    item.classList.add('dragging');
+  });
+
+  window.addEventListener('pointermove', (e) => {
+    if (!dragState) return;
+    e.preventDefault();
+    const st = dragState;
+    const dx = (e.clientX - st.startX) / st.scale;
+    const dy = (e.clientY - st.startY) / st.scale;
+    if (st.mode === 'move') {
+      const pos = clampBannerPos(st.origX + dx, st.origY + dy, st.origWidth, st.origHeight);
+      const snappedX = snapBannerCoord(pos.x, st.origWidth, 1080);
+      const snappedY = snapBannerCoord(pos.y, st.origHeight, 1920);
+      const finalPos = clampBannerPos(snappedX, snappedY, st.origWidth, st.origHeight);
+      writeRect({ x: finalPos.x, y: finalPos.y, width: st.origWidth, height: st.origHeight });
+    } else {
+      let width = st.origWidth;
+      let height = st.origHeight;
+      if (st.axis.includes('e')) width = clampBannerSize(st.origWidth + dx, BANNER_MAX_WIDTH);
+      if (st.axis.includes('s')) height = clampBannerSize(st.origHeight + dy, BANNER_MAX_HEIGHT);
+      const pos = clampBannerPos(st.origX, st.origY, width, height);
+      writeRect({ x: pos.x, y: pos.y, width, height });
+    }
+    updateCinemaBgPreview();
+  });
+
+  window.addEventListener('pointerup', () => {
+    if (!dragState) return;
+    dragState = null;
+    item.classList.remove('dragging');
+    saveSettings();
+  });
+}
+
+makeCinemaRectDraggable(
+  '#cinema-clip-preview-item',
+  () => ({ x: settings.cinemaClipX, y: settings.cinemaClipY, width: settings.cinemaClipWidth, height: settings.cinemaClipHeight }),
+  (rect) => {
+    settings.cinemaClipX = rect.x;
+    settings.cinemaClipY = rect.y;
+    settings.cinemaClipWidth = rect.width;
+    settings.cinemaClipHeight = rect.height;
+  }
+);
+
+makeCinemaRectDraggable(
+  '#cinema-bg-preview-item',
+  () => ({ x: settings.cinemaBgX, y: settings.cinemaBgY, width: settings.cinemaBgWidth, height: settings.cinemaBgHeight }),
+  (rect) => {
+    settings.cinemaBgX = rect.x;
+    settings.cinemaBgY = rect.y;
+    settings.cinemaBgWidth = rect.width;
+    settings.cinemaBgHeight = rect.height;
+  }
+);
 
 function clampCinemaTarget(value) {
   const n = Number(value);
@@ -1491,10 +1896,9 @@ function normalizeStoriesLength(settings) {
     hardMax: clampStoriesSec(settings.storiesHardMaxSec, 390)
   };
   // hardMin <= targetMin <= targetMax <= hardMax
-  next.hardMax = Math.max(next.targetMax, next.hardMax);
-  next.targetMax = Math.max(next.targetMin, next.targetMax);
   next.targetMin = Math.max(next.hardMin, next.targetMin);
-  next.hardMin = Math.min(next.targetMin, next.hardMin);
+  next.targetMax = Math.max(next.targetMin, next.targetMax);
+  next.hardMax = Math.max(next.targetMax, next.hardMax);
   return next;
 }
 
@@ -1537,6 +1941,11 @@ $('#cinema-max-enabled').addEventListener('change', () => {
     $('#cinema-max-sec').value = String(max);
     settings.cinemaMaxSec = max;
   }
+  saveSettings();
+});
+
+$('#cinema-review-enabled').addEventListener('change', () => {
+  settings.cinemaReviewEnabled = !!$('#cinema-review-enabled').checked;
   saveSettings();
 });
 
@@ -2200,11 +2609,14 @@ function syncSharedPreviewFrame() {
 
   const subsOn = !!$('#subtitles-toggle')?.checked;
   const bannerOn = isBannerActive();
+  const cinemaBgOn = isCinemaBgActive();
 
   if (overlay) overlay.style.display = subsOn ? '' : 'none';
   if (dragHint) dragHint.style.display = bannerOn ? '' : 'none';
+  const cinemaDragHint = $('#preview-drag-hint-cinema');
+  if (cinemaDragHint) cinemaDragHint.style.display = cinemaBgOn ? '' : 'none';
 
-  const expanded = subsOn || bannerOn;
+  const expanded = subsOn || bannerOn || cinemaBgOn;
   if (card) card.classList.toggle('collapsed', !expanded);
   stage.style.display = expanded ? '' : 'none';
 
@@ -2252,7 +2664,7 @@ function updateBannerPreview() {
 
 async function probeBannerFile(filePath) {
   try {
-    const res = await window.api.probeMedia(filePath);
+    const res = await window.api.probeMedia(filePath, { chromaKey: settings.bannerChromaKey === true });
     if (!res || !res.success) throw new Error(res?.error || 'probe failed');
     bannerAspect = res.height / res.width;
     bannerThumbnail = res.thumbnail || null;
@@ -2330,6 +2742,12 @@ $('#banner-height').addEventListener('input', () => {
   settings.bannerY = pos.y;
   saveSettings();
   updateBannerPreview();
+});
+
+$('#banner-chroma-key').addEventListener('change', async () => {
+  settings.bannerChromaKey = $('#banner-chroma-key').checked;
+  saveSettings();
+  await refreshBannerProbe();
 });
 
 $('#banner-opacity').addEventListener('input', () => {
@@ -2586,8 +3004,8 @@ $('#subtitle-preview-overlay').addEventListener('pointerdown', (e) => {
       mode: 'move',
       startX: e.clientX,
       startY: e.clientY,
-      origX: Number(settings.subtitleX || 540),
-      origY: Number(settings.subtitleY || 1850),
+      origX: Number(settings.subtitleX ?? 540),
+      origY: Number(settings.subtitleY ?? 1850),
       scale
     };
   }
@@ -2649,7 +3067,9 @@ function updateModelCount() {
 
 function updateGenerateBtn() {
   const modelsOk = bothModelsCustom();
-  const bgRequired = currentGenerationMode() !== 'cinema';
+  // The background folder is required for stories mode AND for cinema mode
+  // with the parallel ADHD layer enabled.
+  const bgRequired = currentGenerationMode() === 'stories' || settings.cinemaBgEnabled === true;
   const canStart = sourcePath && (!bgRequired || bgFolderPath) && outputFolderPath && modelsOk && !isProcessing;
   $('#btn-generate').disabled = !canStart;
 }
@@ -2674,6 +3094,13 @@ async function startGeneration() {
   etaInterval = setInterval(updateEta, 1000);
 
   progressCleanup = window.api.onProgress((data) => {
+    // Cinema review pause: the main process finished scene selection and is
+    // waiting for the user's decision — render the review screen instead of
+    // the generic progress step.
+    if (Array.isArray(data?.reviewScenes)) {
+      showCinemaReview(data.reviewScenes, data.message);
+      return;
+    }
     showProgress(data.step, data.percent, data.message, data);
   });
 
@@ -2687,11 +3114,23 @@ async function startGeneration() {
       cinemaMaxSec: clampCinemaMax(settings.cinemaMaxSec, clampCinemaTarget(settings.cinemaTargetSec)),
       cinemaMinSec: clampCinemaMin(settings.cinemaMinSec),
       cinemaMaxSecEnabled: settings.cinemaMaxSecEnabled !== false,
+      cinemaReview: currentGenerationMode() === 'cinema' && settings.cinemaReviewEnabled !== false,
+      cinemaBgEnabled: isCinemaBgActive(),
+      cinemaBgCanvasFill: normalizeCinemaBgCanvasFillLocal(settings.cinemaBgCanvasFill),
+      cinemaBgLayerOrder: normalizeCinemaBgLayerOrderLocal(settings.cinemaBgLayerOrder),
+      cinemaClipX: Number(settings.cinemaClipX || 0),
+      cinemaClipY: Number(settings.cinemaClipY || 0),
+      cinemaClipWidth: Number(settings.cinemaClipWidth || 1080),
+      cinemaClipHeight: Number(settings.cinemaClipHeight || 960),
+      cinemaBgX: Number(settings.cinemaBgX || 0),
+      cinemaBgY: Number(settings.cinemaBgY ?? 960),
+      cinemaBgWidth: Number(settings.cinemaBgWidth || 1080),
+      cinemaBgHeight: Number(settings.cinemaBgHeight || 960),
       storiesTargetMinSec: clampStoriesSec(settings.storiesTargetMinSec, 90),
       storiesTargetMaxSec: clampStoriesSec(settings.storiesTargetMaxSec, 300),
       storiesHardMinSec: clampStoriesSec(settings.storiesHardMinSec, 60),
       storiesHardMaxSec: clampStoriesSec(settings.storiesHardMaxSec, 390),
-      backgroundFolder: currentGenerationMode() === 'cinema' ? '' : bgFolderPath,
+      backgroundFolder: (currentGenerationMode() === 'stories' || isCinemaBgActive()) ? bgFolderPath : '',
       outputFolder: outputFolderPath,
       subtitlesEnabled: !!settings.subtitlesEnabled,
       subtitleStyle: settings.subtitleStyle || 'Classic',
@@ -2708,8 +3147,8 @@ async function startGeneration() {
       subtitleKaraokeEffects: Array.isArray(settings.subtitleKaraokeEffects) ? settings.subtitleKaraokeEffects : ['highlight'],
       subtitleCase: settings.subtitleCase || 'sentence',
       subtitleCustomPos: !!settings.subtitleCustomPos,
-      subtitleX: Number(settings.subtitleX || 540),
-      subtitleY: Number(settings.subtitleY || 1850),
+      subtitleX: Number(settings.subtitleX ?? 540),
+      subtitleY: Number(settings.subtitleY ?? 1850),
       bannerEnabled: !!settings.bannerEnabled,
       bannerPath: settings.bannerPath || '',
       bannerX: Number(settings.bannerX || 0),
@@ -2717,6 +3156,7 @@ async function startGeneration() {
       bannerWidth: Number(settings.bannerWidth || 300),
       bannerHeight: Number(settings.bannerHeight || 150),
       bannerOpacity: clampBannerOpacity(settings.bannerOpacity),
+      bannerChromaKey: settings.bannerChromaKey === true,
       bannerMode: ['overlay', 'interstitial'].includes(settings.bannerMode) ? settings.bannerMode : 'overlay',
       bannerIntervalSec: clampBannerSeconds(settings.bannerIntervalSec, 60, 5, 3600),
       customProviders: getProviders(),
@@ -2729,11 +3169,18 @@ async function startGeneration() {
 
     if (result.success) {
       const count = result.outputFiles?.length || 0;
+      window.TikTokPanel?.setGeneratedFiles(result.outputFiles || []);
       const elapsed = Date.now() - processStartTime;
       recordStageHistory(elapsed, result.chunksProduced || result.storiesDetected || count || 0);
       etaEstimator.complete();
       setStatus('done', 'Complete');
-      showProgress('Done!', 100, `Created ${count} video(s)`, { stage: 'finalize', stagePercent: 100 });
+      let doneMessage = result.reviewDeclinedAll
+        ? (uiLang === 'ru' ? 'Все сцены исключены — ничего не отрендерено' : 'All scenes excluded — nothing rendered')
+        : `Created ${count} video(s)`;
+      if (result.tiktokQueueError) doneMessage += uiLang === 'ru'
+        ? '\nНе удалось сохранить план TikTok. Готовые видео остались в папке вывода.'
+        : '\nCould not save the TikTok plan. Rendered videos remain in the output folder.';
+      showProgress('Done!', 100, doneMessage, { stage: 'finalize', stagePercent: 100 });
       stats.totalVideos += count;
       stats.totalRenderTimeMs += renderTimeMs;
       stats.lastRun = new Date().toLocaleString();
@@ -2757,6 +3204,7 @@ async function startGeneration() {
   } finally {
     isProcessing = false;
     cancelRequested = false;
+    hideCinemaReview();
     setControlsDisabled(false);
     processStartTime = null;
     etaEstimator = null;
@@ -2782,6 +3230,7 @@ function recordStageHistory(runTotalMs, chunkCount) {
     const d = durations[stage];
     if (!d || d.ms <= 0) continue;
     let perChunkMs = 0;
+    let perMinMs = 0;
     if (stage === 'render') {
       perChunkMs = d.ms / chunks;
     } else if (stage === 'transcribe' || stage === 'analyze' || stage === 'scenes') {
@@ -2801,11 +3250,164 @@ function cancelGeneration() {
   showProgress('Cancelling…', etaEstimator ? etaEstimator.getPercent() : 0, 'Stopping current work…', { raw: true });
 }
 
+// ===== CINEMA SCENE REVIEW =====
+// The main process pauses after scene selection and pushes the candidate
+// list (with one preview frame per scene). The user excludes scenes or
+// moves boundaries, then the decision travels back via reviewScenes().
+
+function fmtMmSS(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function showCinemaReview(scenes, message) {
+  if (reviewSubmitted) return;
+  reviewActive = true;
+
+  const list = $('#cinema-review-list');
+  list.innerHTML = '';
+
+  scenes.forEach((scene) => {
+    const card = document.createElement('div');
+    card.className = 'cinema-review-card';
+    card.dataset.index = String(scene.index);
+
+    const sourceBadge = document.createElement('span');
+    sourceBadge.className = `cinema-review-badge cinema-review-badge-${scene.source === 'action' ? 'action' : 'llm'}`;
+    sourceBadge.textContent = t(`labels.cinemaReviewSource${scene.source === 'action' ? 'Action' : 'Dialogue'}`);
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'cinema-review-title';
+    titleEl.textContent = scene.title || `Scene ${scene.index}`;
+
+    const hookEl = document.createElement('div');
+    hookEl.className = 'cinema-review-hook';
+    hookEl.textContent = scene.hook || '';
+
+    const timesEl = document.createElement('div');
+    timesEl.className = 'cinema-review-times';
+    const durationText = uiLang === 'ru'
+      ? `${Math.round(scene.durationSec)} сек`
+      : `${Math.round(scene.durationSec)}s`;
+    timesEl.textContent = `${fmtMmSS(scene.start)} – ${fmtMmSS(scene.end)} · ${durationText}`;
+
+    const metaCol = document.createElement('div');
+    metaCol.className = 'cinema-review-meta';
+    metaCol.append(sourceBadge, titleEl, hookEl, timesEl);
+
+    const previewCol = document.createElement('div');
+    previewCol.className = 'cinema-review-preview';
+    if (scene.preview) {
+      const img = document.createElement('img');
+      img.src = scene.preview;
+      img.alt = scene.title || `Scene ${scene.index}`;
+      previewCol.appendChild(img);
+    } else {
+      previewCol.classList.add('cinema-review-preview-empty');
+      previewCol.textContent = '…';
+    }
+
+    const includeLabel = document.createElement('label');
+    includeLabel.className = 'cinema-review-include';
+    const includeBox = document.createElement('input');
+    includeBox.type = 'checkbox';
+    includeBox.checked = true;
+    const includeText = document.createElement('span');
+    includeText.textContent = t('labels.cinemaReviewIncludeLabel');
+    includeLabel.append(includeBox, includeText);
+
+    const startInput = document.createElement('input');
+    startInput.type = 'number';
+    startInput.min = '0';
+    startInput.step = '0.5';
+    startInput.value = String(scene.start);
+    const startField = document.createElement('label');
+    startField.className = 'cinema-review-boundary';
+    const startSpan = document.createElement('span');
+    startSpan.textContent = t('labels.cinemaReviewStartLabel');
+    startField.append(startSpan, startInput);
+
+    const endInput = document.createElement('input');
+    endInput.type = 'number';
+    endInput.step = '0.5';
+    endInput.value = String(scene.end);
+    const endField = document.createElement('label');
+    endField.className = 'cinema-review-boundary';
+    const endSpan = document.createElement('span');
+    endSpan.textContent = t('labels.cinemaReviewEndLabel');
+    endField.append(endSpan, endInput);
+
+    const controlsCol = document.createElement('div');
+    controlsCol.className = 'cinema-review-controls';
+    controlsCol.append(includeLabel, startField, endField);
+
+    card.append(previewCol, metaCol, controlsCol);
+    list.appendChild(card);
+  });
+
+  const updateRenderBtn = () => {
+    const includeBoxes = [...list.querySelectorAll('.cinema-review-include input')];
+    const includedCount = includeBoxes.filter((box) => box.checked).length;
+    $('#btn-review-render').disabled = includedCount === 0;
+    $('#btn-review-render').textContent = `${t('labels.cinemaReviewRenderBtn')} (${includedCount})`;
+  };
+  // onchange (not addEventListener): the list element is long-lived, so an
+  // accumulating listener would fire N times after N review pauses.
+  list.onchange = updateRenderBtn;
+  updateRenderBtn();
+
+  if (message) showProgress('Review Scenes', 48, message, { stage: 'render', stagePercent: 0 });
+  $('#cinema-review-section').style.display = '';
+}
+
+function hideCinemaReview() {
+  reviewActive = false;
+  reviewSubmitted = false;
+  $('#cinema-review-section').style.display = 'none';
+  $('#cinema-review-list').innerHTML = '';
+}
+
+function collectSceneEdits() {
+  const edits = [];
+  document.querySelectorAll('#cinema-review-list .cinema-review-card').forEach((card) => {
+    const index = Number(card.dataset.index);
+    const includeBox = card.querySelector('.cinema-review-include input');
+    const bounds = card.querySelectorAll('.cinema-review-boundary input');
+    const startRaw = bounds.length > 0 ? Number(bounds[0].value) : NaN;
+    const endRaw = bounds.length > 1 ? Number(bounds[1].value) : NaN;
+    edits.push({
+      index,
+      include: !!includeBox?.checked,
+      start: Number.isFinite(startRaw) ? startRaw : undefined,
+      end: Number.isFinite(endRaw) ? endRaw : undefined
+    });
+  });
+  return edits;
+}
+
+$('#btn-review-render').addEventListener('click', () => {
+  if (!reviewActive || reviewSubmitted) return;
+  reviewSubmitted = true;
+  window.api.reviewScenes({ accept: true, scenes: collectSceneEdits() });
+  $('#cinema-review-section').style.display = 'none';
+  setStatus('processing', 'Processing…');
+  showProgress('Rendering…', 50, 'Rendering selected scenes…', { stage: 'render', stagePercent: 0 });
+});
+
+$('#btn-review-cancel').addEventListener('click', () => {
+  if (!reviewActive || reviewSubmitted) return;
+  reviewSubmitted = true;
+  window.api.reviewScenes({ accept: false, scenes: [] });
+  $('#cinema-review-section').style.display = 'none';
+});
+
 // ===== UI HELPERS =====
 function setControlsDisabled(disabled) {
   const selectors = [
     '#pick-source', '#pick-background', '#pick-output',
     '#mode-stories', '#mode-cinema', '#cinema-scene-count', '#cinema-fill-mode', '#cinema-target-sec', '#cinema-max-sec',
+    '#cinema-bg-toggle', '#cinema-bg-canvas-fill', '#cinema-bg-layer-order',
+    '#cinema-clip-width', '#cinema-clip-height', '#cinema-bg-width', '#cinema-bg-height', '#btn-reset-cinema-bg-layout',
     '#app-language', '#app-theme',
     '#preset-select', '#preset-name-input', '#btn-create-preset', '#btn-save-preset', '#btn-delete-preset',
     '#proxy-toggle',
@@ -2847,6 +3449,7 @@ function setControlsDisabled(disabled) {
     renderPresets();
     setContainerControlsDisabled('#proxy-fields', !$('#proxy-toggle').checked);
     setContainerControlsDisabled('#subtitle-fields', !$('#subtitles-toggle').checked);
+    setContainerControlsDisabled('#cinema-bg-fields', !$('#cinema-bg-toggle').checked);
     updateKaraokeFieldsState();
     $('#btn-add-provider').disabled = !(normalizeBaseUrlLocal($('#cp-url').value) && String($('#cp-key').value || '').trim());
     $('#btn-add-model').disabled = !String($('#cm-model').value || '').trim();
@@ -3047,8 +3650,8 @@ function updateSubtitlePreview() {
   const previewHandle = $('#subtitle-preview-handle');
   overlay.classList.toggle('free-pos', freePos);
   if (freePos) {
-    const x = Math.max(0, Math.min(1080, Math.round(Number(settings.subtitleX || 540))));
-    const y = Math.max(0, Math.min(1920, Math.round(Number(settings.subtitleY || 1850))));
+    const x = Math.max(0, Math.min(1080, Math.round(Number(settings.subtitleX ?? 540))));
+    const y = Math.max(0, Math.min(1920, Math.round(Number(settings.subtitleY ?? 1850))));
     overlay.style.left = `${x}px`;
     overlay.style.top = `${y}px`;
     overlay.style.right = 'auto';

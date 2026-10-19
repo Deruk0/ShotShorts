@@ -8,8 +8,6 @@ node_modules/
 *.local
 
 # Temp
-.temp_ag_kit/
-antigravity-doc
 tests
 others
 *.tmp
@@ -27,7 +25,6 @@ __pycache__/
 # Build outputs
 dist/
 build/
-.next/
 out/
 
 # Electron build artifacts

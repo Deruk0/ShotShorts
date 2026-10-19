@@ -79,6 +79,7 @@ async function getStore() {
       bannerY: { type: 'number', default: 60 },
       bannerWidth: { type: 'number', default: 300 },
       bannerHeight: { type: 'number', default: 150 },
+      bannerChromaKey: { type: 'boolean', default: false },
       bannerOpacity: { type: 'number', default: 100 },
       bannerMode: { type: 'string', default: 'overlay' },
       bannerIntervalSec: { type: 'number', default: 60 },
@@ -90,6 +91,18 @@ async function getStore() {
       cinemaMaxSec: { type: 'number', default: 90 },
       cinemaMinSec: { type: 'number', default: 20 },
       cinemaMaxSecEnabled: { type: 'boolean', default: true },
+      cinemaReviewEnabled: { type: 'boolean', default: true },
+      cinemaBgEnabled: { type: 'boolean', default: false },
+      cinemaBgCanvasFill: { type: 'string', default: 'black' },
+      cinemaBgLayerOrder: { type: 'string', default: 'movieTop' },
+      cinemaClipX: { type: 'number', default: 0 },
+      cinemaClipY: { type: 'number', default: 0 },
+      cinemaClipWidth: { type: 'number', default: 1080 },
+      cinemaClipHeight: { type: 'number', default: 960 },
+      cinemaBgX: { type: 'number', default: 0 },
+      cinemaBgY: { type: 'number', default: 960 },
+      cinemaBgWidth: { type: 'number', default: 1080 },
+      cinemaBgHeight: { type: 'number', default: 960 },
       storiesTargetMinSec: { type: 'number', default: 90 },
       storiesTargetMaxSec: { type: 'number', default: 300 },
       storiesHardMinSec: { type: 'number', default: 60 },
@@ -201,6 +214,7 @@ async function getSettings() {
     bannerWidth: store.get('bannerWidth'),
     bannerHeight: store.get('bannerHeight'),
     bannerOpacity: store.get('bannerOpacity'),
+    bannerChromaKey: store.get('bannerChromaKey'),
     bannerMode: store.get('bannerMode'),
     bannerIntervalSec: store.get('bannerIntervalSec'),
     bannerDurationSec: store.get('bannerDurationSec'),
@@ -211,6 +225,18 @@ async function getSettings() {
     cinemaMaxSec: store.get('cinemaMaxSec'),
     cinemaMinSec: store.get('cinemaMinSec'),
     cinemaMaxSecEnabled: store.get('cinemaMaxSecEnabled'),
+    cinemaReviewEnabled: store.get('cinemaReviewEnabled'),
+    cinemaBgEnabled: store.get('cinemaBgEnabled'),
+    cinemaBgCanvasFill: store.get('cinemaBgCanvasFill'),
+    cinemaBgLayerOrder: store.get('cinemaBgLayerOrder'),
+    cinemaClipX: store.get('cinemaClipX'),
+    cinemaClipY: store.get('cinemaClipY'),
+    cinemaClipWidth: store.get('cinemaClipWidth'),
+    cinemaClipHeight: store.get('cinemaClipHeight'),
+    cinemaBgX: store.get('cinemaBgX'),
+    cinemaBgY: store.get('cinemaBgY'),
+    cinemaBgWidth: store.get('cinemaBgWidth'),
+    cinemaBgHeight: store.get('cinemaBgHeight'),
     storiesTargetMinSec: store.get('storiesTargetMinSec'),
     storiesTargetMaxSec: store.get('storiesTargetMaxSec'),
     storiesHardMinSec: store.get('storiesHardMinSec'),
@@ -274,6 +300,7 @@ async function saveSettings(settings) {
   if (settings.bannerY !== undefined) store.set('bannerY', Number(settings.bannerY));
   if (settings.bannerWidth !== undefined) store.set('bannerWidth', Number(settings.bannerWidth));
   if (settings.bannerHeight !== undefined) store.set('bannerHeight', Number(settings.bannerHeight));
+  if (settings.bannerChromaKey !== undefined) store.set('bannerChromaKey', settings.bannerChromaKey === true);
   if (settings.bannerOpacity !== undefined) store.set('bannerOpacity', Number(settings.bannerOpacity));
   if (settings.bannerMode !== undefined) store.set('bannerMode', ['overlay', 'interstitial'].includes(settings.bannerMode) ? settings.bannerMode : 'overlay');
   if (settings.bannerIntervalSec !== undefined) store.set('bannerIntervalSec', Math.max(1, Math.min(3600, Number(settings.bannerIntervalSec) || 60)));
@@ -299,6 +326,23 @@ async function saveSettings(settings) {
   if (settings.cinemaMaxSecEnabled !== undefined) {
     store.set('cinemaMaxSecEnabled', settings.cinemaMaxSecEnabled !== false);
   }
+  if (settings.cinemaReviewEnabled !== undefined) {
+    store.set('cinemaReviewEnabled', settings.cinemaReviewEnabled !== false);
+  }
+  if (settings.cinemaBgEnabled !== undefined) store.set('cinemaBgEnabled', !!settings.cinemaBgEnabled);
+  if (settings.cinemaBgCanvasFill !== undefined) {
+    store.set('cinemaBgCanvasFill', ['black', 'blurMovie', 'blurBg'].includes(settings.cinemaBgCanvasFill) ? settings.cinemaBgCanvasFill : 'black');
+  }
+  if (settings.cinemaBgLayerOrder !== undefined) {
+    store.set('cinemaBgLayerOrder', settings.cinemaBgLayerOrder === 'bgTop' ? 'bgTop' : 'movieTop');
+  }
+  // Rectangle layouts are stored raw (renderer + cinema-bg-utils clamp them).
+  [
+    'cinemaClipX', 'cinemaClipY', 'cinemaClipWidth', 'cinemaClipHeight',
+    'cinemaBgX', 'cinemaBgY', 'cinemaBgWidth', 'cinemaBgHeight'
+  ].forEach((key) => {
+    if (settings[key] !== undefined) store.set(key, Number(settings[key]));
+  });
   if (settings.cinemaMaxSec !== undefined) {
     const max = Number(settings.cinemaMaxSec);
     // The soft max only applies when the limit is enabled; otherwise any
@@ -331,10 +375,9 @@ async function saveSettings(settings) {
     if (settings.storiesTargetMaxSec !== undefined) next.targetMax = clampSec(settings.storiesTargetMaxSec, 15, 1800, prev.targetMax);
     if (settings.storiesHardMaxSec !== undefined) next.hardMax = clampSec(settings.storiesHardMaxSec, 15, 1800, prev.hardMax);
 
-    next.hardMax = Math.max(next.targetMax, next.hardMax);
-    next.targetMax = Math.max(next.targetMin, next.targetMax);
     next.targetMin = Math.max(next.hardMin, next.targetMin);
-    next.hardMin = Math.min(next.targetMin, next.hardMin);
+    next.targetMax = Math.max(next.targetMin, next.targetMax);
+    next.hardMax = Math.max(next.targetMax, next.hardMax);
 
     store.set('storiesHardMinSec', next.hardMin);
     store.set('storiesTargetMinSec', next.targetMin);

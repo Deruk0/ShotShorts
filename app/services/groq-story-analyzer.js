@@ -75,6 +75,24 @@ const SYSTEM_FIND_SCENES = [
   '- emit only strong scenes; emit nothing rather than weak filler'
 ].join('\n');
 
+// Cinema mode: give LLM-titled context to action scenes picked by the energy
+// detector. The detector only knows "loud + fast cuts + speechless" — the
+// model turns that window into a human-facing title and hook when the scene
+// contains at least some speech to anchor on.
+const SYSTEM_TITLE_ACTION = [
+  'You are a viral short-form video editor. You receive several movie scenes that were picked automatically by an action-energy detector (loud, fast montage, little speech). For each scene you also get the fragment of the movie transcript that falls inside it.',
+  '',
+  'TASK',
+  'For every numbered scene, invent the title and the hook of the vertical TikTok/Shorts/Reels clip cut from that time range.',
+  '',
+  'RULES',
+  '- If the scene has no transcript text or the text is useless noise (single words, grunts), set skip=true for that scene.',
+  '- title in Russian, 2-5 words, catchy, never spoil the ending',
+  '- hook in Russian: the most quotable line from the scene or a one-sentence teaser that makes people watch',
+  '- n must repeat the scene number from the input exactly',
+  '- JSON only, no markdown: {"scenes":[{"n":1,"title":"Короткий заголовок","hook":"Цепляющая фраза","skip":false}]}'
+].join('\n');
+
 const groqChatKeyCooldowns = new Map();
 const groqChatKeyCursor = { current: 0 };
 
@@ -1118,6 +1136,85 @@ class GroqStoryAnalyzer {
       start: Math.max(0, scene.start),
       end: Math.max(scene.start + 1, scene.end)
     }));
+  }
+
+  /**
+   * Cinema mode: build the user prompt for naming action scenes. Each entry
+   * carries the scene number, timecodes and the transcript text inside its
+   * window (trimmed). Scenes without enough text are filtered out by the
+   * caller and never reach this prompt. Pure.
+   */
+  _buildActionTitlePrompt(actionEntries) {
+    const lines = [
+      'Name the following action scenes of a movie. Each entry lists the scene number, its time range in the movie, and the transcript fragment inside it.',
+      'Scenes:',
+      ...actionEntries.map((entry) => {
+        const start = Math.max(0, Number(entry.start) || 0);
+        const end = Math.max(start, Number(entry.end) || start);
+        return [
+          `n=${entry.n}`,
+          `time=${start.toFixed(1)}-${end.toFixed(1)} sec`,
+          `transcript: ${entry.text}`
+        ].join(' | ');
+      })
+    ];
+    return lines.join('\n');
+  }
+
+  /**
+   * Cinema mode: ask the model for a title + hook for each action-picked
+   * scene that contains enough speech to describe. Scenes keep their
+   * fallback "Action N" name when the model skips them or the call fails.
+   * Returns the input array (mutated in place where a title was produced).
+   */
+  async titleActionScenes(scenes, transcriptSegments, onProgress, options = {}) {
+    const signal = options.signal;
+    throwIfAborted(signal);
+
+    if (!this.modelChain.length && !this.apiKeys.length) {
+      throw new Error('No analysis model configured. Build the analysis chain in Settings.');
+    }
+
+    const list = (Array.isArray(scenes) ? scenes : []).filter((scene) => scene?.source === 'action');
+    if (!list.length) return scenes || [];
+
+    const segments = (Array.isArray(transcriptSegments) ? transcriptSegments : [])
+      .map((s) => ({ start: Number(s?.start) || 0, end: Number(s?.end) || 0, text: String(s?.text || '').trim() }))
+      .filter((s) => s.end > s.start && s.text);
+
+    const MIN_ACTION_TEXT_CHARS = 40;
+    const MAX_TEXT_CHARS = 600;
+    const entries = [];
+    for (const scene of list) {
+      const text = segments
+        .filter((s) => s.start < scene.end && s.end > scene.start)
+        .map((s) => s.text)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (text.length < MIN_ACTION_TEXT_CHARS) continue;
+      entries.push({ n: scene.index, start: scene.start, end: scene.end, text: text.slice(0, MAX_TEXT_CHARS), scene });
+    }
+    if (!entries.length) return scenes || [];
+
+    onProgress?.(`Naming ${entries.length} action scene(s)…`);
+    this._systemPrompt = SYSTEM_TITLE_ACTION;
+    const prompt = this._buildActionTitlePrompt(entries);
+    const parsed = await this._requestWindowWithRetry(prompt, onProgress, 'Action titles', signal);
+    const results = Array.isArray(parsed?.scenes) ? parsed.scenes : [];
+
+    for (const result of results) {
+      const entry = entries.find((e) => Number(e.n) === Number(result?.n));
+      if (!entry) continue;
+      const title = normalizeText(result?.title).slice(0, 80);
+      const hook = normalizeText(result?.hook).slice(0, 200);
+      if (result?.skip === true || result?.skip === 'true') continue;
+      if (!title) continue;
+      entry.scene.title = title;
+      entry.scene.hook = hook || entry.scene.hook;
+    }
+
+    return scenes || [];
   }
 
   async analyzeTranscript(transcriptSegments, totalDuration, onProgress, options = {}) {

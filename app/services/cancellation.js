@@ -63,6 +63,7 @@ function runFfmpegCommand(cmd, {
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    let invoked = false;
     let removeAbortHandler = () => {};
 
     const finish = (fn) => {
@@ -74,19 +75,30 @@ function runFfmpegCommand(cmd, {
 
     removeAbortHandler = onAbort(signal, () => {
       try { cmd.kill('SIGKILL'); } catch {}
-      finish(() => reject(createAbortError()));
+      // Wait for the terminal event once run() was called, so callers can
+      // safely remove output files after FFmpeg closes them (also on Windows).
+      if (!invoked) finish(() => reject(createAbortError()));
     });
 
     try {
       onStart?.(cmd);
+      if (settled) return;
       cmd
-        .on('end', () => finish(resolve))
+        // fluent-ffmpeg prepares inputs asynchronously; kill() before spawn
+        // has no effect, so repeat cancellation when the process appears.
+        .on('start', () => {
+          if (signal?.aborted) {
+            try { cmd.kill('SIGKILL'); } catch {}
+          }
+        })
+        .on('end', () => finish(() => signal?.aborted ? reject(createAbortError()) : resolve()))
         .on('error', (err, stdout, stderr) => {
           finish(() => reject(isAbortError(err) || signal?.aborted
             ? createAbortError()
             : formatError(err, stdout, stderr)));
-        })
-        .run();
+        });
+      invoked = true;
+      cmd.run();
     } catch (err) {
       finish(() => reject(signal?.aborted ? createAbortError() : err));
     }

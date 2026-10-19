@@ -194,3 +194,17 @@ test('cinema scene prompt carries the length guidance from user settings', () =>
   const unguided = analyzer._buildScenePrompt(window, 120, 3, null);
   assert.doesNotMatch(unguided, /LENGTH GUIDANCE/);
 });
+
+test('action title prompt lists scene numbers, timecodes and transcript fragments', () => {
+  const analyzer = new GroqStoryAnalyzer(['test-key']);
+  const entries = [
+    { n: 2, start: 30, end: 45, text: 'Держи правее, за тем поворотом.' },
+    { n: 5, start: 100.4, end: 121.2, text: 'Всё, отходим. Быстрее!' }
+  ];
+
+  const prompt = analyzer._buildActionTitlePrompt(entries);
+
+  assert.match(prompt, /n=2 \| time=30\.0-45\.0 sec \| transcript: Держи правее/);
+  assert.match(prompt, /n=5 \| time=100\.4-121\.2 sec \| transcript: Всё, отходим/);
+  assert.match(prompt, /Name the following action scenes/);
+});

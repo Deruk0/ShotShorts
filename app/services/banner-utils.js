@@ -1,5 +1,8 @@
 const path = require('path');
 
+// Shared by thumbnail previews and both render paths; key before scaling to preserve edges.
+const BANNER_CHROMA_FILTER = 'format=rgba,colorkey=0x00FF00:0.4:0.1';
+
 const BANNER_CANVAS_WIDTH = 1080;
 const BANNER_CANVAS_HEIGHT = 1920;
 const BANNER_MIN_SIZE = 20;
@@ -128,13 +131,13 @@ function snapBannerCoord(pos, size, canvas, threshold = BANNER_SNAP_THRESHOLD) {
  * colorchannelmixer. The banner input must be added to the command
  * separately (with `-stream_loop -1` for video banners).
  */
-function buildBannerFilterStrings(inputIndex, layout, baseLabel = 'vsub', outLabel = 'vout', opacity = 1) {
+function buildBannerFilterStrings(inputIndex, layout, baseLabel = 'vsub', outLabel = 'vout', opacity = 1, chromaKey = false) {
   const op = Math.min(1, Math.max(0, Number.isFinite(Number(opacity)) ? Number(opacity) : 1));
   const scaleChain = op < 1
     ? `fps=30,scale=${layout.width}:${layout.height}:flags=lanczos,setsar=1,format=rgba,colorchannelmixer=aa=${Math.round(op * 1000) / 1000}`
     : `fps=30,scale=${layout.width}:${layout.height}:flags=lanczos,setsar=1`;
   return [
-    `[${inputIndex}:v]${scaleChain}[ban]`,
+    `[${inputIndex}:v]${chromaKey === true ? BANNER_CHROMA_FILTER + ',' : ''}${scaleChain}[ban]`,
     `[${baseLabel}][ban]overlay=${layout.x}:${layout.y}:eof_action=repeat[${outLabel}]`
   ];
 }
@@ -212,7 +215,7 @@ function round2(value) {
  * forked explicitly with split/asplit (a filtergraph output pad may be
  * linked exactly once).
  */
-function buildInterstitialFilterGraph({ baseLabel = 'vconcat', bannerIndexBase, audioInputIndex, bannerHasAudio = false, layout, opacity = 1, segments, fps = 30 }) {
+function buildInterstitialFilterGraph({ baseLabel = 'vconcat', bannerIndexBase, audioInputIndex, bannerHasAudio = false, layout, opacity = 1, chromaKey = false, segments, fps = 30 }) {
   const op = Math.min(1, Math.max(0, Number.isFinite(Number(opacity)) ? Number(opacity) : 1));
   const bannerChain = op < 1
     ? `fps=${fps},scale=${layout.width}:${layout.height}:flags=lanczos,setsar=1,format=rgba,colorchannelmixer=aa=${Math.round(op * 1000) / 1000}`
@@ -254,7 +257,7 @@ function buildInterstitialFilterGraph({ baseLabel = 'vconcat', bannerIndexBase, 
     // Frozen frame of the main video: one frame cloned for the window.
     filters.push(`${vsrc}trim=start=${seg.start}:duration=${(1 / fps).toFixed(4)},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=${dur},trim=end=${dur},setpts=PTS-STARTPTS[ifr${i}]`);
     // Banner video plays from its start (fresh demuxer per window); padded if shorter.
-    filters.push(`[${bannerInput}:v]${bannerChain},tpad=stop_mode=clone:stop_duration=${dur},trim=end=${dur},setpts=PTS-STARTPTS[ibn${i}]`);
+    filters.push(`[${bannerInput}:v]${chromaKey === true ? BANNER_CHROMA_FILTER + ',' : ''}${bannerChain},tpad=stop_mode=clone:stop_duration=${dur},trim=end=${dur},setpts=PTS-STARTPTS[ibn${i}]`);
     filters.push(`[ifr${i}][ibn${i}]overlay=${layout.x}:${layout.y}:eof_action=pass,trim=end=${dur},setpts=PTS-STARTPTS[iseg${i}]`);
     // Main audio is muted during the window; the banner's own audio plays.
     if (bannerHasAudio) {
@@ -275,6 +278,7 @@ function buildInterstitialFilterGraph({ baseLabel = 'vconcat', bannerIndexBase, 
 }
 
 module.exports = {
+  BANNER_CHROMA_FILTER,
   BANNER_CANVAS_WIDTH,
   BANNER_CANVAS_HEIGHT,
   BANNER_MIN_SIZE,

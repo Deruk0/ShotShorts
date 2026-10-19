@@ -67,6 +67,12 @@ test('findCustomProvider and findCustomModel match by id', () => {
   assert.equal(findCustomModel(models, 'm2', providers), null);
 });
 
+test('models with no remaining valid providers are dropped', () => {
+  const models = [{ id: 'm1', providerId: 'deleted', modelId: 'whisper' }];
+  assert.deepEqual(normalizeCustomModels(models, []), []);
+  assert.deepEqual(normalizeCustomModels(models, [{ id: 'deleted', baseUrl: 'invalid', apiKey: 'k' }]), []);
+});
+
 test('normalizeModelKeyList keeps only unique custom keys', () => {
   assert.deepEqual(
     normalizeModelKeyList(['custom:a', 'custom:a', 'plain', '', 'custom:b']),

@@ -5,6 +5,7 @@ const {
   parseSceneCuts,
   scoreActionWindows,
   snapSceneToCuts,
+  snapDialogueSceneStart,
   buildActionScenes,
   buildCinemaChunkProfile,
   normalizeCinemaLengthConfig,
@@ -12,6 +13,7 @@ const {
   normalizeActionScenes,
   scenesOverlap,
   buildCinemaSceneList,
+  applySceneEdits,
   writeSceneMetaFile
 } = require('../app/services/cinema-scene-detector');
 const fs = require('node:fs');
@@ -105,6 +107,50 @@ test('scoreActionWindows never returns overlapping windows', () => {
   }
 });
 
+test('scoreActionWindows uses the requested window length and step', () => {
+  const total = 120;
+  const loudness = makeLoudness(
+    Array.from({ length: 1200 }, (_, i) => ({
+      t: i * 0.1,
+      lufs: i * 0.1 >= 30 && i * 0.1 < 60 ? -8 : -20
+    }))
+  );
+  const cuts = [];
+  for (let t = 30; t < 60; t += 1.5) cuts.push({ time: t, score: 0.5 });
+
+  const windows = scoreActionWindows(loudness, cuts, [], total, 3, 30);
+
+  assert.equal(windows.length, 1);
+  assert.equal(windows[0].start, 30);
+  assert.equal(windows[0].end, 60);
+  assert.equal(windows[0].end - windows[0].start, 30);
+});
+
+test('buildActionScenes sizes windows from lengthConfig and falls back to 15s', () => {
+  const total = 600;
+  const energy = {
+    loudnessIntervals: makeLoudness(
+      Array.from({ length: 6000 }, (_, i) => ({
+        t: i * 0.1,
+        lufs: i * 0.1 >= 100 && i * 0.1 < 160 ? -8 : -20
+      }))
+    ),
+    sceneCuts: []
+  };
+
+  const legacy = buildActionScenes(energy, [], total, 1);
+  assert.ok(legacy.length === 0 || legacy[0].end - legacy[0].start <= 15 + 0.5);
+
+  const guided = buildActionScenes(energy, [], total, 1, { targetSec: 60 });
+  assert.equal(guided.length, 1);
+  assert.equal(guided[0].end - guided[0].start, 60);
+
+  // targetSec is clamped into ACTION_WINDOW_MIN_SEC..MAX (8..90).
+  const clamped = buildActionScenes(energy, [], total, 1, { targetSec: 300 });
+  assert.equal(clamped.length, 1);
+  assert.equal(clamped[0].end - clamped[0].start, 90);
+});
+
 test('snapSceneToCuts moves the start to a nearby cut', () => {
   const cuts = [{ time: 10.0, score: 0.5 }, { time: 14.2, score: 0.5 }];
   const scene = { start: 10.4, end: 25.4 };
@@ -124,6 +170,43 @@ test('snapSceneToCuts keeps the scene intact when no cuts are nearby', () => {
 
   assert.equal(snapped.start, 5);
   assert.equal(snapped.end, 20);
+});
+
+test('snapDialogueSceneStart moves the start back to a nearby cut', () => {
+  const cuts = [{ time: 48.4, score: 0.6 }];
+  const scene = { start: 50, end: 80 };
+
+  const snapped = snapDialogueSceneStart(scene, cuts, 120, 0);
+
+  assert.equal(snapped.start, 48.4);
+  assert.equal(snapped.end, 80);
+});
+
+test('snapDialogueSceneStart is a no-op without cuts or when the cut sits on the start', () => {
+  assert.deepEqual(snapDialogueSceneStart({ start: 50, end: 80 }, [], 120, 0), { start: 50, end: 80 });
+  assert.deepEqual(
+    snapDialogueSceneStart({ start: 50, end: 80 }, [{ time: 49.98, score: 0.6 }], 120, 0),
+    { start: 50, end: 80 }
+  );
+});
+
+test('snapDialogueSceneStart refuses to overlap the previous scene', () => {
+  const cuts = [{ time: 40, score: 0.6 }];
+  const scene = { start: 41.2, end: 70 };
+  // Previous scene ends at 40.5: snapping to 40 would collide.
+  const snapped = snapDialogueSceneStart(scene, cuts, 120, 40.5);
+
+  assert.equal(snapped.start, 41.2);
+  assert.equal(snapped.end, 70);
+});
+
+test('snapDialogueSceneStart never looks further back than the tolerance', () => {
+  const cuts = [{ time: 42, score: 0.6 }];
+  const scene = { start: 50, end: 80 };
+
+  const snapped = snapDialogueSceneStart(scene, cuts, 120, 0);
+
+  assert.equal(snapped.start, 50);
 });
 
 test('buildActionScenes clamps, snaps and limits requested count', () => {
@@ -231,6 +314,50 @@ test('buildCinemaSceneList keeps everything when there is no action', () => {
   const list = buildCinemaSceneList([{ title: 'Сцена', start: 1, end: 9 }], [], 60);
   assert.equal(list.length, 1);
   assert.equal(list[0].source, 'llm');
+});
+
+test('applySceneEdits removes excluded scenes and renumbers chronologically', () => {
+  const scenes = [
+    { index: 1, title: 'A', start: 0, end: 20 },
+    { index: 2, title: 'B', start: 30, end: 50 },
+    { index: 3, title: 'C', start: 60, end: 80 }
+  ];
+
+  const edited = applySceneEdits(scenes, { 2: { include: false } }, 100);
+
+  assert.equal(edited.length, 2);
+  assert.deepEqual(edited.map((s) => s.title), ['A', 'C']);
+  assert.deepEqual(edited.map((s) => s.index), [1, 2]);
+});
+
+test('applySceneEdits clamps moved boundaries and ignores invalid edits', () => {
+  const scenes = [
+    { index: 1, title: 'A', start: 0, end: 20 },
+    { index: 2, title: 'B', start: 30, end: 50 }
+  ];
+
+  const edited = applySceneEdits(scenes, {
+    1: { start: -10, end: 15 },
+    2: { start: 999, end: 1000 }
+  }, 100);
+
+  assert.equal(edited[0].start, 0);
+  assert.equal(edited[0].end, 15);
+  // Both bounds clamp to the movie limit (100): that leaves no footage, so
+  // the edit is ignored and the scene keeps its original boundaries.
+  assert.equal(edited[1].start, 30);
+  assert.equal(edited[1].end, 50);
+});
+
+test('applySceneEdits keeps scenes without edits and supports empty result', () => {
+  const scenes = [{ index: 1, title: 'A', start: 0, end: 20 }];
+
+  const untouched = applySceneEdits(scenes, {}, 100);
+  assert.equal(untouched.length, 1);
+  assert.equal(untouched[0].start, 0);
+
+  const allRemoved = applySceneEdits(scenes, { 1: { include: false } }, 100);
+  assert.deepEqual(allRemoved, []);
 });
 
 test('writeSceneMetaFile writes title, hook and timestamps', () => {

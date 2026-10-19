@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **План публикаций TikTok**: результаты генерации автоматически добавляются в постоянную очередь с отдельным временем и настройками каждого ролика. Общий шаблон назначает последовательные слоты, описание, видимость и разрешения. При явном включении автозагрузки новые клипы передаются заранее в нативное расписание TikTok Studio через отдельный профиль Edge; ключи разработчика для этого способа не нужны. Неоднозначные отправки останавливают очередь и требуют проверки, чтобы избежать дубликатов.
+- Вкладка **TikTok** также поддерживает отдельную немедленную публикацию через Direct Post API: OAuth Desktop с PKCE, описание, видимость, разрешения комментариев/дуэтов/сшивания, маркировка ИИ и рекламы, отправка и проверка статуса. Ключи и токены шифруются средствами ОС; публичная публикация через этот API требует аудита TikTok.
+- **СДВГ-ролик параллельно фильму (режим кино)** — чекбокс «СДВГ-ролик параллельно» в секции «Режим кино» добавляет на вертикальный кадр второй слой: отрывок фильма и случайные ролики из папки фоновых видео идут одновременно, каждый в своём прямоугольнике. Раскладка настраивается как у баннера: оба прямоугольника перетаскиваются и растягиваются за ручки в живом превью (крайние ручки — ширина/высота независимо, угловая — обе оси сразу, без фиксации пропорций), есть невидимые направляющие по центру/краям кадра, минимальная видимая часть 10px и кнопка «Сбросить раскладку» (по умолчанию фильм сверху, СДВГ снизу, пополам 1080x960). Дополнительно выбираются: порядок слоёв (фильм поверх СДВГ или наоборот), заполнение пустого места кадра (чёрный / размытый кадр фильма / размытый СДВГ-кадр) и размеры сторон в пикселях; настройка «Вертикальный кадр» при этом применяется внутри прямоугольника фильма. СДВГ-ролики сменяют друг друга случайно без повторов подряд и играют без звука — звук остаётся только у фильма; если роликов в папке меньше, чем длительность сцены, один ролик зацикливается, а при сбое декодирования цепочки рендер повторяется с одним зацикленным роликом. Папка фоновых видео становится обязательной в режиме кино с включённым слоем (кнопка Generate и главный процесс проверяют её), все новые настройки входят в пресеты. Режим баннера не менялся; бонусом исправлено перетаскивание баннера в превью при выключенных субтитрах (`cinema-bg-utils.js`, `buildCinemaBgFilterGraph`, `selectBackgroundVideos` выделен в общий метод со Stories-фоном)
+- **Экран ревью сцен в режиме кино** — перед рендером пайплайн останавливается и показывает карточки выбранных сцен: превью-кадр, название, хук, бейдж источника (диалог/экшн), таймкоды и длительность. Сцену можно исключить галочкой или подвинуть её границы (поля start/end в секундах), после чего рендер запускается кнопкой «Рендерить выбранные» только по подтверждённым сценам; «Отменить прогон» полностью останавливает выполнение без рендера. Настройка «Просмотр сцен перед рендером» в секции «Режим кино» отключает экран и возвращает прежний one-click режим; отмена на этапе ревью работает и через общую кнопку Cancel. Отключённые при ревью временные файлы превью удаляются сразу (`requestSceneReview`/`applySceneEdits` в `cinema-scene-detector.js`, IPC `cinema:reviewDecision`)
+- **Снап начал диалоговых сцен к склейкам** — энергетический проход (ebur128 + scdet) теперь выполняется для каждого кино-прогона, и начала сцен, найденных LLM по диалогам, привязываются к ближайшей визуальной склейке фильма (до 2 сек назад), чтобы клипы не открывались посреди кадра; снап не допускает пересечения с предыдущей сценой и не трогает конец сцены (`snapDialogueSceneStart`)
+- **Длина action-окон из настроек** — action-детектор использует целевую длину сцены из настроек режима кино (клампится в 8–90 сек) вместо жёстких 15 сек; без настроек остаётся прежнее поведение
+- **Заголовки и хуки для action-сцен через LLM** — когда внутри action-сцены достаточно речи (≥ 40 символов транскрипта), модель генерирует для неё название и хук вместо плейсхолдера «Action N»; сцены без речи и сбои вызова оставляют fallback без остановки пайплайна (`titleActionScenes`, `SYSTEM_TITLE_ACTION`)
+- Сцены в кино-списке перенумеровываются хронологически: ревью-экран, метаданные клипов и правки границ используют стабильные порядковые номера
+
 ## [2.1.0] - 2026-09-09
 
 ### Added
@@ -38,60 +48,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Экспериментальная поддержка OpenRouter и NVIDIA NIM удалена — клиенты `base-audio-client.js`, `openrouter-client.js` и `nvidia-client.js` больше не поставляются. Пайплайн снова работает только через **Groq** (Whisper для транскрибации + Qwen для анализа)
 
 
-## [2.0.2] - 2026-02-04
-- **New Skills**:
-    - `rust-pro` - Master Rust 1.75+ 
-- **Agent Workflows**:
-    - Updated `orchestrate.md` fix output turkish
-
-
-## [2.0.1] - 2026-01-26
-
-### Added
-
-- **Agent Flow Documentation**: New comprehensive workflow documentation
-    - Added `.agent/AGENT_FLOW.md` - Complete agent flow architecture guide
-    - Documented Agent Routing Checklist (mandatory steps before code/design work)
-    - Documented Socratic Gate Protocol for requirement clarification
-    - Added Cross-Skill References pattern documentation
-- **New Skills**:
-    - `react-best-practices` - Consolidated Next.js and React expertise
-    - `web-design-guidelines` - Professional web design standards and patterns
-
-### Changed
-
-- **Skill Consolidation**: Merged `nextjs-best-practices` and `react-patterns` into unified `react-best-practices` skill
-- **Architecture Updates**:
-    - Enhanced `.agent/ARCHITECTURE.md` with improved flow diagrams
-    - Updated `.agent/rules/GEMINI.md` with Agent Routing Checklist
-- **Agent Updates**:
-    - Updated `frontend-specialist.md` with new skill references
-    - Updated `qa-automation-engineer.md` with enhanced testing workflows
-- **Frontend Design Skill**: Enhanced `frontend-design/SKILL.md` with cross-references to `web-design-guidelines`
-
-### Removed
-
-- Deprecated `nextjs-best-practices` skill (consolidated into `react-best-practices`)
-- Deprecated `react-patterns` skill (consolidated into `react-best-practices`)
-
-### Fixed
-
-- **Agent Flow Accuracy**: Corrected misleading terminology in AGENT_FLOW.md
-    - Changed "Parallel Execution" → "Sequential Multi-Domain Execution"
-    - Changed "Integration Layer" → "Code Coherence" with accurate description
-    - Added reality notes about AI's sequential processing vs. simulated multi-agent behavior
-    - Clarified that scripts require user approval (not auto-executed)
-
-## [2.0.0] - Unreleased
-
-### Initial Release
-
-- Initial release of ShotShorts
-- 20 specialized AI agents
-- 37 domain-specific skills
-- 11 workflow slash commands
-- CLI tool for easy installation and updates
-- Comprehensive documentation and architecture guide
-
 [Unreleased]: https://github.com/Deruk0/ShotShorts/compare/v2.1.0...HEAD
-[2.0.0]: https://github.com/Deruk0/ShotShorts/releases/tag/v2.0.0

@@ -330,7 +330,7 @@
     menu.className = 'sharp-select__popup';
     menu.setAttribute('role', 'listbox');
     menu.hidden = true;
-    document.body.appendChild(menu);
+    (select.closest('dialog') || document.body).appendChild(menu);
     trigger.setAttribute('aria-controls', menu.id);
 
     const labels = Array.from(document.querySelectorAll('label[for]'))
