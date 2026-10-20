@@ -4,11 +4,28 @@
   const api = window.api.tiktok.queue;
   const strings = {
     ru: {
+      statisticsTitle: 'Статистика TikTok', statisticsRefresh: 'Обновить статистику', statisticsEmpty: 'Статистика ещё не загружалась.',
+      statisticsScope: 'Данные по роликам на текущей странице списка TikTok Studio, не по всей истории канала.',
+      statisticsUpdated: 'Статистика сохранена.', statisticsWorking: 'Обновляю статистику. Если загружается ролик, дождусь завершения его отправки.',
+      statisticsDate: 'Обновлено', statisticsVideo: 'Ролик', statisticsViews: 'Просмотры', statisticsLikes: 'Лайки', statisticsComments: 'Комментарии',
+      statisticsAccount: 'Аккаунт статистики', statisticsCount: 'Считано роликов',
+      studio_statistics_unavailable: 'Не удалось прочитать статистику Studio. Предыдущие данные сохранены. Проверьте вход и доступность списка публикаций.',
+      statistics_storage_error: 'Не удалось прочитать или сохранить статистику.',
+      applySchedule: 'Сохранить и применить время ко всем черновикам',
+      applyScheduleHint: 'Распределяет время у готовых черновиков по первой дате и интервалу. Занятые слоты пропускаются. Описания и остальные настройки роликов сохраняются.',
+      scheduleApplied: 'Время публикаций обновлено у всех черновиков.',
+      queue_no_drafts: 'В списке нет черновиков для изменения времени.',
+      autoRemoveUploaded: 'Автоматически убирать из списка после подтверждённой загрузки в TikTok',
+      autoRemoveHint: 'Применяется к следующим загрузкам. Файлы на компьютере и ролики в TikTok сохраняются.',
+      openVideo: 'Открыть видео', videoOpened: 'Видео открыто в видеоплеере.',
+      video_file_missing: 'Файл видео не найден. Возможно, он перемещён или удалён.',
+      video_open_failed: 'Не удалось открыть видео. Проверьте установленный видеоплеер.',
+      invalid_video_file: 'Ролик больше недоступен в списке или формат файла не поддерживается.',
       insertPreset: 'Вставить сохранённый шаблон', chooseCaptionPreset: 'Выберите шаблон', lockedDefaults: 'Закройте редактор ролика, чтобы менять общие настройки.', presets: 'Пресеты описаний и хештегов', captionPreset: 'Пресет описания', hashtagPresetId: 'Пресет хештегов', none: 'Без пресета', newPreset: 'Новый пресет', presetName: 'Название пресета', captionTemplate: 'Шаблон описания', tags: 'Хештеги', minCount: 'Минимум хештегов', maxCount: 'Максимум хештегов', savePreset: 'Сохранить пресет', deletePreset: 'Удалить пресет', presetSaved: 'Пресет сохранён.', previewCaption: 'Пример результата', applyCaption: 'Вставить в описание', preview: 'Итоговое описание', captionCommands: '{name} — имя файла без расширения; {filename} — с расширением; {n} — номер; {hashtags} — случайные хештеги. Любой другой текст сохраняется. Если {hashtags} нет, выбранные хештеги добавятся в конце.', hashtagHint: 'Введите хештеги через пробел, запятую или с новой строки. Знак # необязателен. Количество и порядок случайные; повторов нет. Если тегов меньше минимума, используются все доступные.', invalid_hashtags: 'Введите от 1 до 200 хештегов: буквы, цифры или _.', invalid_hashtag_range: 'Количество хештегов: целые числа от 1 до 200; минимум не больше максимума.', invalid_preset_name: 'Введите название пресета длиной до 80 символов.', preset_name_exists: 'Пресет с таким названием уже есть. Выберите его для изменения.', preset_not_found: 'Пресет не найден.', hashtag_preset_not_found: 'Пресет хештегов не найден. Выберите другой.', invalid_caption_sample: 'Не удалось определить имя файла для описания.', unsaved: 'Есть несохранённые изменения. Сначала сохраните их или закройте редактирование.',
-      refreshAccounts: 'Обновить аккаунты', addAccount: 'Добавить аккаунт', chooseAccount: 'Выберите аккаунт', pendingAccount: 'Продолжить вход', accountsHint: 'После входа нажмите «Обновить аккаунты». Выберите аккаунт в настройках новых роликов или отдельно для каждого видео.', accountsUpdated: 'Аккаунты обновлены. Выберите аккаунт для публикации.', noAccounts: 'Войдите в TikTok Studio и обновите список аккаунтов.', studio_account_unavailable: 'Не удалось определить аккаунт. Откройте его окно Studio, завершите вход и нажмите «Обновить аккаунты».', studio_accounts_unreadable: 'Не удалось прочитать список аккаунтов.',
+      refreshAccounts: 'Обновить аккаунты', addAccount: 'Добавить аккаунт', chooseAccount: 'Выберите аккаунт', pendingAccount: 'Продолжить вход', accountsHint: 'После входа закройте окно браузера и нажмите «Обновить аккаунты». Выберите аккаунт в настройках новых роликов или отдельно для каждого видео.', accountsUpdated: 'Аккаунты обновлены. Выберите аккаунт для публикации.', noAccounts: 'Войдите в TikTok Studio и обновите список аккаунтов.', studio_account_unavailable: 'Не удалось определить аккаунт. Откройте его окно Studio, завершите вход и нажмите «Обновить аккаунты».', studio_accounts_unreadable: 'Не удалось прочитать список аккаунтов.',
       connection: '1. Аккаунт TikTok Studio', clips: '3. Очередь роликов', delivery: 'Отправка в расписание', schedule: 'Время публикаций', content: 'Описание и доступ', automation: 'Автозагрузка', templateStep: '2. Настройки новых роликов',
       heading: 'План публикаций', intro: 'Готовые ролики автоматически добавляются сюда после обработки. Каждому ролику можно задать своё время и настройки. Видео загружаются заранее в расписание TikTok Studio.',
-      open: 'Открыть TikTok Studio / войти', login: 'Один раз войдите в TikTok в отдельном окне Edge. Для этого способа ключи разработчика не нужны. Окно можно оставить открытым; пароль хранит браузер.',
+      open: 'Открыть TikTok Studio / войти', login: 'Один раз войдите в TikTok в отдельном окне браузера. Для этого способа ключи разработчика не нужны. После входа закройте это окно и нажмите «Обновить аккаунты».',
       template: 'Настройки для новых роликов', account: 'Аккаунт для публикации', firstAt: 'Первая публикация', intervalMinutes: 'Интервал между роликами (мин)',
       title: 'Описание и хештеги', templateHint: '{name} — имя клипа, {n} — номер в плане. Настройки применяются только к новым роликам.',
       privacy: 'Кто может смотреть', PUBLIC_TO_EVERYONE: 'Все', MUTUAL_FOLLOW_FRIENDS: 'Друзья', FOLLOWER_OF_CREATOR: 'Подписчики', SELF_ONLY: 'Только я', choose: 'Выберите видимость',
@@ -23,7 +40,13 @@
       reconcile: 'Проверьте ролик в TikTok Studio: повторная отправка автоматически заблокирована.',
       confirmed: 'Уже запланировано в TikTok', notSent: 'Не запланировано — вернуть в план',
       localOnly: 'Без даты', saved: 'План сохранён.', changed: 'Настройки изменены. Сохраните их перед отправкой.',
-      working: 'Выполняется…', browserOpened: 'Окно TikTok Studio открыто. Войдите в нужный аккаунт и вернитесь в ShotShorts.',
+      working: 'Выполняется…', browserOpened: 'Окно TikTok Studio открыто. Войдите в нужный аккаунт, закройте это окно и нажмите «Обновить аккаунты».',
+      loginBrowser: 'Браузер для нового аккаунта',
+      browserHint: 'Выбор применяется при добавлении аккаунта. Сохранённые аккаунты открываются в своём браузере. Для другого браузера потребуется новый вход.',
+      studio_chrome_unavailable: 'Не удалось открыть Chrome. Проверьте установку Google Chrome.',
+      studio_browser_invalid: 'Выберите Chrome или Edge.',
+      studio_browser_state_unavailable: 'Не удалось проверить окна браузера. Закройте окна входа, открытые программой, и повторите обновление аккаунтов.',
+      studio_login_window_open: 'Завершите вход и закройте окно браузера, открытое программой. Затем нажмите «Обновить аккаунты».',
       studio_edge_unavailable: 'Не удалось открыть отдельный профиль Edge. Проверьте установку Microsoft Edge.',
       studio_account_required: 'Укажите имя аккаунта TikTok без @.', invalid_schedule_time: 'Укажите корректные дату и время.',
       schedule_requires_five_minutes: 'Минуты должны быть кратны 5: 00, 05, 10 и далее.',
@@ -64,11 +87,35 @@
       studio_interrupted_check_status: 'Загрузка прервана. Проверьте TikTok перед повторной отправкой.'
     },
     en: {
+      statisticsTitle: 'TikTok statistics', statisticsRefresh: 'Refresh statistics', statisticsEmpty: 'Statistics have not been loaded yet.',
+      statisticsScope: 'Videos on the current TikTok Studio content page, not the channel’s entire history.',
+      statisticsUpdated: 'Statistics saved.', statisticsWorking: 'Refreshing statistics. Any active video upload will finish first.',
+      statisticsDate: 'Updated', statisticsVideo: 'Video', statisticsViews: 'Views', statisticsLikes: 'Likes', statisticsComments: 'Comments',
+      statisticsAccount: 'Statistics account', statisticsCount: 'Videos read',
+      studio_statistics_unavailable: 'Could not read Studio statistics. Previous data is kept. Check sign-in and the content list.',
+      statistics_storage_error: 'Could not read or save statistics.',
+      applySchedule: 'Save and apply timing to all drafts',
+      applyScheduleHint: 'Assigns draft times using the first date and interval, skipping occupied slots. Video captions and other settings are kept.',
+      scheduleApplied: 'Publication times updated for all drafts.',
+      queue_no_drafts: 'There are no drafts to reschedule.',
+      autoRemoveUploaded: 'Automatically remove from this list after confirmed upload to TikTok',
+      autoRemoveHint: 'Applies to future uploads. Local files and videos on TikTok are kept.',
+      openVideo: 'Open video', videoOpened: 'Video opened in your video player.',
+      video_file_missing: 'Video file not found. It may have been moved or deleted.',
+      video_open_failed: 'Could not open the video. Check your installed video player.',
+      invalid_video_file: 'The video is no longer in the list or its file format is unsupported.',
       insertPreset: 'Insert a saved template', chooseCaptionPreset: 'Choose a template', lockedDefaults: 'Close the clip editor to change defaults.', presets: 'Caption and hashtag presets', captionPreset: 'Caption preset', hashtagPresetId: 'Hashtag preset', none: 'No preset', newPreset: 'New preset', presetName: 'Preset name', captionTemplate: 'Caption template', tags: 'Hashtags', minCount: 'Minimum hashtags', maxCount: 'Maximum hashtags', savePreset: 'Save preset', deletePreset: 'Delete preset', presetSaved: 'Preset saved.', previewCaption: 'Preview result', applyCaption: 'Insert into caption', preview: 'Final caption', captionCommands: '{name}: filename without extension; {filename}: with extension; {n}: number; {hashtags}: random hashtags. Other text is kept. Selected hashtags are appended when {hashtags} is absent.', hashtagHint: 'Separate tags with spaces, commas, or new lines. # is optional. Count and order are random, without duplicates. Smaller pools use all available tags.', invalid_hashtags: 'Enter 1 to 200 hashtags using letters, digits, or _.', invalid_hashtag_range: 'Use whole numbers from 1 to 200; minimum must not exceed maximum.', invalid_preset_name: 'Enter a preset name up to 80 characters.', preset_name_exists: 'This preset name exists. Select it to edit.', preset_not_found: 'Preset not found.', hashtag_preset_not_found: 'Hashtag preset not found. Choose another.', invalid_caption_sample: 'Cannot determine the filename for this caption.', unsaved: 'Save your changes or close the editor first.',
-      refreshAccounts: 'Refresh accounts', addAccount: 'Add account', chooseAccount: 'Choose an account', pendingAccount: 'Continue sign-in', accountsHint: 'After signing in, click Refresh accounts. Choose an account in defaults or separately for each video.', accountsUpdated: 'Accounts refreshed. Choose an account for publication.', noAccounts: 'Sign in to TikTok Studio, then refresh accounts.', studio_account_unavailable: 'Cannot detect the account. Open its Studio window, finish signing in, then refresh accounts.', studio_accounts_unreadable: 'Cannot read the saved account list.',
+      refreshAccounts: 'Refresh accounts', addAccount: 'Add account', chooseAccount: 'Choose an account', pendingAccount: 'Continue sign-in', accountsHint: 'After signing in, close the browser window and click Refresh accounts. Choose an account in defaults or separately for each video.', accountsUpdated: 'Accounts refreshed. Choose an account for publication.', noAccounts: 'Sign in to TikTok Studio, then refresh accounts.', studio_account_unavailable: 'Cannot detect the account. Open its Studio window, finish signing in, then refresh accounts.', studio_accounts_unreadable: 'Cannot read the saved account list.',
+      loginBrowser: 'Browser for a new account',
+      browserHint: 'Applies when adding an account. Saved accounts open in their own browser. Another browser requires a new sign-in.',
+      studio_chrome_unavailable: 'Could not open Chrome. Check that Google Chrome is installed.',
+      studio_edge_unavailable: 'Could not open Edge. Check that Microsoft Edge is installed.',
+      studio_browser_invalid: 'Choose Chrome or Edge.',
+      studio_browser_state_unavailable: 'Could not check browser windows. Close sign-in windows opened by the app, then refresh accounts again.',
+      studio_login_window_open: 'Finish signing in and close the browser window opened by the app. Then click Refresh accounts.',
       connection: '1. TikTok Studio account', clips: '3. Clip queue', delivery: 'Send to scheduler', schedule: 'Publication times', content: 'Description and visibility', automation: 'Automatic uploads', templateStep: '2. Defaults for new clips',
       heading: 'Publication plan', intro: 'Generated clips appear here automatically. Give each clip its own time and settings. Videos are uploaded ahead of time to TikTok Studio’s scheduler.',
-      open: 'Open TikTok Studio / sign in', login: 'Sign in once in the separate Edge window. Developer keys are not required for this method. The browser keeps your session.',
+      open: 'Open TikTok Studio / sign in', login: 'Sign in once in the separate browser window. Developer keys are not required for this method. After signing in, close this window and click Refresh accounts.',
       template: 'Defaults for new clips', account: 'Publication account', firstAt: 'First publication', intervalMinutes: 'Interval between clips (min)',
       title: 'Description and hashtags', templateHint: '{name} is the clip name; {n} is its number in the plan. Defaults apply only to new clips.',
       privacy: 'Who can watch', PUBLIC_TO_EVERYONE: 'Everyone', MUTUAL_FOLLOW_FRIENDS: 'Friends', FOLLOWER_OF_CREATOR: 'Followers', SELF_ONLY: 'Only me', choose: 'Choose visibility',
@@ -80,7 +127,7 @@
       pause: 'Stop queue uploads', resume: 'Resume queue', paused: 'Queue is paused.', zone: 'Time zone:',
       limits: 'Use 5-minute increments, at least 15 minutes before publication. TikTok validates its date limits. Use the separate Direct Post form below for commercial content.',
       reconcile: 'Check this clip in TikTok Studio before retrying; automatic retries are blocked.', confirmed: 'Already scheduled on TikTok', notSent: 'Not scheduled — return to plan',
-      localOnly: 'No date', saved: 'Plan saved.', changed: 'Settings changed. Save before sending.', working: 'Working…', browserOpened: 'TikTok Studio is open. Sign in to the intended account, then return to ShotShorts.',
+      localOnly: 'No date', saved: 'Plan saved.', changed: 'Settings changed. Save before sending.', working: 'Working…', browserOpened: 'TikTok Studio is open. Sign in, close the browser window, then click Refresh accounts.',
       studio_upload_timeout: 'The TikTok Studio upload form did not appear. Check that you are signed in.',
       studio_upload_not_ready: 'The video or TikTok form was not ready within 30 minutes. Check upload progress and TikTok messages.',
       studio_upload_navigation_timeout: 'Could not open the TikTok upload form for the next video.',
@@ -106,12 +153,14 @@
   let lang = 'en';
   let data = { template: {}, items: [] };
   let accounts = [];
+  let statistics = { accounts: [] };
+  let statisticsAccountId;
+  let loginBrowser = 'msedge';
   let selected = null;
   let templateOpen;
   let modalOpen = false;
   let dirty = false;
   let busy = false;
-  let awaitingAccount = false;
   const tr = (key) => strings[lang][key] || strings.en[key] || key;
   const el = (tag, text, cls) => { const node = document.createElement(tag); if (text) node.textContent = text; if (cls) node.className = cls; return node; };
   const $ = (id) => document.getElementById(`tq-${id}`);
@@ -313,31 +362,84 @@
     catch (error) { alert.textContent = tr(error.message); status.textContent = ''; }
     finally { busy = false; root.classList.remove('queue-busy'); if (!dirty && !modalOpen) render(); }
   }
+  function statisticsCard() {
+    const card = el('section', '', 'tiktok-card queue-statistics');
+    card.append(el('h3', tr('statisticsTitle'), 'tiktok-block-title'), el('p', tr('statisticsScope'), 'hint'));
+    const available = accounts.filter(entry => entry.username);
+    if (!available.some(entry => entry.id === statisticsAccountId)) statisticsAccountId = available[0]?.id;
+    const tools = el('div', '', 'tiktok-actions');
+    const group = el('div', '', 'field-group');
+    const label = el('label', tr('statisticsAccount'), 'field-label'); label.htmlFor = 'tq-statistics-account';
+    const choice = el('select'); choice.id = label.htmlFor;
+    for (const entry of available) choice.add(new Option(`@${entry.username}`, entry.id));
+    choice.value = statisticsAccountId || ''; choice.disabled = !available.length;
+    choice.addEventListener('change', () => {
+      statisticsAccountId = choice.value;
+      const replacement = statisticsCard(); card.replaceWith(replacement); window.SharpSelect?.mountAll(replacement);
+    });
+    group.append(label, choice); tools.append(group);
+    const update = button('statisticsRefresh', () => perform(async () => {
+      status.textContent = tr('statisticsWorking');
+      statistics = await result(api.refreshStatistics(choice.value));
+      const replacement = statisticsCard(); card.replaceWith(replacement); window.SharpSelect?.mountAll(replacement);
+      status.textContent = tr('statisticsUpdated');
+    }));
+    update.disabled = !available.length; tools.append(update); card.append(tools);
+    const account = available.find(entry => entry.id === statisticsAccountId)?.username;
+    const snapshot = statistics.accounts.find(entry => entry.account === account);
+    if (!snapshot) { card.append(el('p', tr('statisticsEmpty'), 'hint')); return card; }
+    card.append(el('p', `${tr('statisticsDate')}: ${new Date(snapshot.updatedAt).toLocaleString(lang)} · ${tr('statisticsCount')}: ${snapshot.videos.length}`, 'hint'));
+    const wrapper = el('div', '', 'statistics-table-scroll');
+    const table = el('table', '', 'statistics-table');
+    const head = el('thead'); const labels = el('tr');
+    for (const key of ['statisticsVideo', 'statisticsViews', 'statisticsLikes', 'statisticsComments']) {
+      const cell = el('th', tr(key)); cell.scope = 'col'; labels.append(cell);
+    }
+    head.append(labels); table.append(head);
+    const body = el('tbody');
+    for (const video of snapshot.videos) {
+      const row = el('tr'); row.append(el('td', video.title));
+      for (const key of ['views', 'likes', 'comments']) row.append(el('td', Number(video[key]).toLocaleString(lang)));
+      body.append(row);
+    }
+    table.append(body); wrapper.append(table); card.append(wrapper); return card;
+  }
   function render() {
+    const scroller = root.closest('.tab-content');
+    const scrollTop = scroller?.scrollTop;
     root.replaceChildren(el('div', tr('heading'), 'section-title'), el('p', tr('intro'), 'hint'));
     const connection = el('section', '', 'tiktok-card queue-connection');
     const connectionInfo = el('div'); connectionInfo.append(el('h3', tr('connection'), 'tiktok-block-title'), el('p', tr('login'), 'hint'));
-    connection.append(connectionInfo, button('open', () => perform(async () => { awaitingAccount = true; await result(api.openStudio()); status.textContent = tr('browserOpened'); })));
+    connection.append(connectionInfo, button('open', () => perform(async () => { await result(api.openStudio()); status.textContent = tr('browserOpened'); })));
     const accountActions = el('div', '', 'tiktok-actions');
+    const browserGroup = el('div', '', 'field-group');
+    const browserLabel = el('label', tr('loginBrowser'), 'field-label'); browserLabel.htmlFor = 'tq-login-browser';
+    const browserSelect = el('select'); browserSelect.id = 'tq-login-browser';
+    browserSelect.add(new Option('Microsoft Edge', 'msedge')); browserSelect.add(new Option('Google Chrome', 'chrome'));
+    browserSelect.value = loginBrowser;
+    browserSelect.addEventListener('change', () => { loginBrowser = browserSelect.value; });
+    browserGroup.append(browserLabel, browserSelect, el('p', tr('browserHint'), 'hint')); connectionInfo.append(browserGroup);
     accountActions.append(connection.lastElementChild,
       button('refreshAccounts', () => perform(async () => {
         if (dirty) throw new Error('changed');
-        accounts = await result(api.refreshAccounts()); awaitingAccount = false; status.textContent = tr('accountsUpdated');
+        accounts = await result(api.refreshAccounts()); status.textContent = tr('accountsUpdated');
       })),
       button('addAccount', () => perform(async () => {
         if (dirty) throw new Error('changed');
-        awaitingAccount = true; accounts = await result(api.addAccount()); status.textContent = tr('browserOpened');
+        accounts = await result(api.addAccount(loginBrowser)); status.textContent = tr('browserOpened');
       })));
     connection.append(accountActions); root.append(connection);
     const accountList = el('div', '', 'queue-accounts');
     for (const entry of accounts) {
       const accountButton = el('button', entry.username ? `@${entry.username}` : tr('pendingAccount'), 'btn btn-secondary');
+      accountButton.title = entry.browser === 'chrome' ? 'Google Chrome' : 'Microsoft Edge';
       accountButton.type = 'button'; accountButton.addEventListener('click', () => perform(async () => {
-        awaitingAccount = true; await result(api.openStudio(entry.id)); status.textContent = tr('browserOpened');
+        await result(api.openStudio(entry.id)); status.textContent = tr('browserOpened');
       })); accountList.append(accountButton);
     }
     if (!accounts.some(entry => entry.username)) accountList.append(el('p', tr('noAccounts'), 'hint'));
     connectionInfo.append(el('p', tr('accountsHint'), 'hint'), accountList);
+    root.append(statisticsCard());
     const libraryActions = el('div', '', 'tiktok-actions'); libraryActions.append(button('presets', managePresets)); root.append(libraryActions);
     const workspace = el('div', '', 'queue-workspace'); root.append(workspace);
     const details = el('details'); details.open = templateOpen ?? (!data.template.firstAt && !data.items.length); details.className = 'queue-template tiktok-card';
@@ -356,10 +458,18 @@
     const automation = el('div', '', 'queue-automation'); automation.append(el('h4', tr('automation'), 'tiktok-group-title'));
     const auto = checkbox(form, 'autoUpload', data.template.autoUpload);
     automation.append(auto.parentElement); form.append(automation);
-    form.append(button('saveTemplate', () => perform(async () => {
+    const templateActions = el('div', '', 'tiktok-actions'); form.append(templateActions);
+    templateActions.append(button('saveTemplate', () => perform(async () => {
       data = await result(api.template({ ...defaults.read(), firstAt: isoValue(first.value), intervalMinutes: Number(interval.value), autoUpload: auto.checked }));
       dirty = false; render();
     }), 'btn btn-primary'));
+    const applySchedule = button('applySchedule', () => perform(async () => {
+      data = await result(api.template({ ...defaults.read(), firstAt: isoValue(first.value), intervalMinutes: Number(interval.value), autoUpload: auto.checked, applySchedule: true }));
+      dirty = false; status.textContent = tr('scheduleApplied'); render();
+    }));
+    applySchedule.disabled = !data.items.some(item => item.status === 'draft');
+    templateActions.append(applySchedule);
+    form.append(el('p', tr('applyScheduleHint'), 'hint'));
     form.addEventListener('input', markDirty);
     if (selected) {
       form.querySelectorAll('input, textarea, select, button').forEach(control => { control.disabled = true; });
@@ -381,6 +491,9 @@
       if (item.accountCheck) card.append(el('p', `${tr('expectedAccount')}: @${item.accountCheck.expected} · ${tr('actualAccount')}: ${item.accountCheck.actual ? `@${item.accountCheck.actual}` : tr('unknownAccount')}`, 'hint'));
       for (const warning of item.receipt?.warnings || []) card.append(el('p', tr(warning), 'hint'));
       const actions = el('div', '', 'tiktok-actions'); card.append(actions);
+      actions.append(button('openVideo', () => perform(async () => {
+        await result(api.openVideo(item.id)); status.textContent = tr('videoOpened');
+      })));
       if (item.status === 'draft') {
         actions.append(button('edit', () => { if (!canLeave()) return; selected = item.id; dirty = false; render(); document.getElementById('tq-editor')?.scrollIntoView({ block: 'nearest' }); }));
       }
@@ -409,6 +522,11 @@
       list.append(card);
     }
     const delivery = el('div', '', 'queue-delivery'); delivery.append(el('h4', tr('delivery'), 'tiktok-group-title')); plan.append(delivery);
+    const autoRemove = checkbox(delivery, 'autoRemoveUploaded', data.autoRemoveUploaded);
+    delivery.append(el('p', tr('autoRemoveHint'), 'hint'));
+    autoRemove.addEventListener('change', () => perform(async () => {
+      data = await result(api.preferences({ autoRemoveUploaded: autoRemove.checked }));
+    }));
     const consent = checkbox(root, 'consent'); delivery.append(consent.parentElement);
     const actions = el('div', '', 'tiktok-actions');
     const send = button('send', () => perform(async () => {
@@ -424,21 +542,21 @@
     if (data.paused) delivery.append(el('p', tr('paused'), 'hint'));
     connectionInfo.append(status, alert);
     window.SharpSelect?.mountAll(root);
+    // Rebuilding the panel can temporarily shrink it and clamp scrollTop.
+    // Restore after controls are mounted; the browser clamps only at the new end.
+    if (scroller) scroller.scrollTo({ top: scrollTop, behavior: 'instant' });
   }
   async function refresh() {
     try {
-      const [plan, savedAccounts] = await Promise.all([result(api.get()), result(api.accounts())]);
-      data = plan; accounts = savedAccounts; if (!dirty && !busy && !modalOpen) render();
+      const [plan, savedAccounts, savedStatistics] = await Promise.all([result(api.get()), result(api.accounts()), result(api.statistics()).catch(() => null)]);
+      data = plan; accounts = savedAccounts;
+      if (savedStatistics) statistics = savedStatistics;
+      else alert.textContent = tr('statistics_storage_error');
+      if (!dirty && !busy && !modalOpen) render();
     }
     catch (error) { alert.textContent = tr(error.message); if (!alert.isConnected) root.append(alert); }
   }
   window.TikTokQueuePanel = { refresh, setLanguage(value) { lang = value === 'ru' ? 'ru' : 'en'; if (!dirty && !modalOpen) render(); } };
-  window.addEventListener('focus', () => {
-    if (!awaitingAccount || dirty || busy || modalOpen || document.getElementById('tab-tiktok').style.display === 'none') return;
-    perform(async () => {
-      accounts = await result(api.refreshAccounts()); awaitingAccount = false; status.textContent = tr('accountsUpdated');
-    });
-  });
   const unsubscribe = api.onChanged(refresh);
   window.addEventListener('beforeunload', unsubscribe);
   window.TikTokQueuePanel.setLanguage(typeof uiLang === 'string' ? uiLang : 'en');

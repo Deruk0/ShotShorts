@@ -235,7 +235,7 @@ const { createStudioDriver, prepareStudioPage, confirmScheduled, localSchedule, 
     let submissions = 0;
     let nextUploadClicks = 0;
     let activeItem;
-    const driver = createStudioDriver({ profilePath: path.join(dir, 'profile'), launch: async () => {
+    const driver = createStudioDriver({ profileOpen: async () => false, profilePath: path.join(dir, 'profile'), launch: async () => {
       const isolated = await browser.newContext();
       const uploadForm = changedClasses.replace("window.published=0; document.getElementById('publish').onclick=()=>{window.published++};", `
         window.published=0; document.getElementById('publish').onclick=()=>{

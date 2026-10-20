@@ -44,12 +44,15 @@ function createTikTokQueue({ storage, upload, notify = () => {}, now = Date.now 
   let controller;
   let kickRequested = false;
   let stopped = false;
+  function validateSchedule(scheduledAt) {
+    const time = Date.parse(scheduledAt);
+    if (!Number.isFinite(time) || time < now() + 15 * 60000) throw new Error('studio_schedule_too_soon');
+    if (time % (5 * 60000)) throw new Error('schedule_requires_five_minutes');
+  }
   function validateItem(item) {
     if (!/^[a-zA-Z0-9_.]{2,64}$/.test(item.account || '')) throw new Error('studio_account_required');
     if (!item.settings.privacy) throw new Error('privacy_level_option_mismatch');
-    const time = Date.parse(item.scheduledAt);
-    if (!Number.isFinite(time) || time < now() + 15 * 60000) throw new Error('studio_schedule_too_soon');
-    if (time % (5 * 60000)) throw new Error('schedule_requires_five_minutes');
+    validateSchedule(item.scheduledAt);
   }
   const transact = (fn, save = true) => {
     const operation = serial.then(async () => {
@@ -59,6 +62,9 @@ function createTikTokQueue({ storage, upload, notify = () => {}, now = Date.now 
         if (loaded.version !== 1 || !Array.isArray(loaded.items)) throw new Error('queue_unreadable');
         loaded.template = { ...defaults(), ...loaded.template };
         loaded.captionPresets ||= []; loaded.hashtagPresets ||= [];
+        loaded.autoRemoveUploaded = loaded.autoRemoveUploaded === true;
+        loaded.completedUploads ||= [];
+        if (!Array.isArray(loaded.completedUploads)) throw new Error('queue_unreadable');
         if (!Array.isArray(loaded.captionPresets) || !Array.isArray(loaded.hashtagPresets)) throw new Error('queue_unreadable');
         let interrupted = false;
         for (const item of loaded.items) {
@@ -96,7 +102,16 @@ function createTikTokQueue({ storage, upload, notify = () => {}, now = Date.now 
           validateItem(item);
           const receipt = await upload(item, controller.signal);
           if (receipt?.confirmed !== true) throw new Error('studio_submission_needs_review');
-          await transact((next) => { const current = next.items.find((i) => i.id === item.id); current.status = 'scheduled'; current.receipt = receipt; });
+          await transact((next) => {
+            const current = next.items.find((i) => i.id === item.id);
+            current.status = 'scheduled'; current.receipt = receipt;
+            if (next.autoRemoveUploaded) {
+              // Retain only deduplication/slot metadata after removing the card.
+              // A repeated renderer notification must not upload this file again.
+              next.completedUploads.push({ filePath: current.filePath, scheduledAt: current.scheduledAt });
+              next.items = next.items.filter(entry => entry.id !== current.id);
+            }
+          });
         } catch (error) {
           await transact((next) => {
             const current = next.items.find((i) => i.id === item.id);
@@ -138,6 +153,10 @@ function createTikTokQueue({ storage, upload, notify = () => {}, now = Date.now 
   }
   return {
     get() { return transact(() => undefined, false); },
+    preferences(input) { return transact(next => {
+      if (typeof input?.autoRemoveUploaded !== 'boolean') throw new Error('invalid_queue_preferences');
+      next.autoRemoveUploaded = input.autoRemoveUploaded;
+    }); },
     previewCaption(input) { return transact(next => composeCaption({
       title: input?.title, fileName: input?.fileName, number: input?.number,
       hashtagPreset: hashtagPreset(next, input?.hashtagPresetId)
@@ -164,14 +183,29 @@ function createTikTokQueue({ storage, upload, notify = () => {}, now = Date.now 
       const template = { ...normalizeSettings(input), hashtagPresetId: input.hashtagPresetId || '', account, autoUpload: input.autoUpload === true,
         firstAt: dateValue(input.firstAt, true), intervalMinutes: interval };
       if (template.autoUpload) validateItem({ account, settings: template, scheduledAt: template.firstAt });
+      if (input.applySchedule === true) {
+        validateSchedule(template.firstAt);
+        const drafts = next.items.filter(item => item.status === 'draft');
+        if (!drafts.length) throw new Error('queue_no_drafts');
+        const occupied = new Set([...next.items.filter(item => item.status !== 'draft'), ...next.completedUploads]
+          .map(item => Date.parse(item.scheduledAt)).filter(Number.isFinite));
+        let time = Date.parse(template.firstAt);
+        for (const item of drafts) {
+          while (occupied.has(time)) time += interval * 60000;
+          item.scheduledAt = new Date(time).toISOString();
+          if (['studio_schedule_too_soon', 'schedule_requires_five_minutes', 'invalid_schedule_time', 'schedule_time_in_past'].includes(item.error)) delete item.error;
+          time += interval * 60000;
+        }
+      }
       next.template = template;
     }); },
     addGenerated(files) { return transact((next) => {
       if (!Array.isArray(files) || files.some((file) => typeof file !== 'string' || !path.isAbsolute(file))) throw new Error('invalid_video_file');
-      const existing = new Set(next.items.map((item) => path.resolve(item.filePath).toLowerCase()));
+      const knownItems = [...next.items, ...next.completedUploads];
+      const existing = new Set(knownItems.map((item) => path.resolve(item.filePath).toLowerCase()));
       let nextTime = next.template.firstAt ? Date.parse(next.template.firstAt) : null;
       if (nextTime !== null) {
-        for (const item of next.items) {
+        for (const item of knownItems) {
           if (item.scheduledAt) nextTime = Math.max(nextTime, Date.parse(item.scheduledAt) + next.template.intervalMinutes * 60000);
         }
       }
@@ -180,7 +214,7 @@ function createTikTokQueue({ storage, upload, notify = () => {}, now = Date.now 
         if (existing.has(key)) continue;
         existing.add(key);
         const name = path.basename(filePath, path.extname(filePath));
-        const title = composeCaption({ title: next.template.title, fileName: filePath, number: next.items.length + 1,
+        const title = composeCaption({ title: next.template.title, fileName: filePath, number: next.items.length + next.completedUploads.length + 1,
           hashtagPreset: hashtagPreset(next, next.template.hashtagPresetId) });
         const item = { id: randomUUID(), filePath, name, settings: normalizeSettings({ ...next.template, title }), account: next.template.account || '',
           scheduledAt: nextTime === null ? '' : new Date(nextTime).toISOString(), status: 'draft', createdAt: new Date(now()).toISOString() };

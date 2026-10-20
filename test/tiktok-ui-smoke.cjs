@@ -10,9 +10,10 @@ const path = require('node:path');
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'shotshorts-tiktok-ui-'));
   const bootstrap = path.join(temp, 'main.cjs');
   const appMain = path.resolve(__dirname, '../app/main.js');
+  for (const name of ['one', 'two', 'scheduled']) await fs.writeFile(path.join(temp, `${name}.mp4`), Buffer.alloc(32));
   await fs.writeFile(path.join(temp, 'tiktok-queue.json'), JSON.stringify({ version: 1, paused: false,
     template: { firstAt: '', title: '{name}', intervalMinutes: 60, privacy: '', account: '', autoUpload: false },
-    items: ['one', 'two', 'scheduled'].map((name, index) => ({ id: name, filePath: `C:\\fixture\\${name}.mp4`, name, status: name === 'scheduled' ? 'scheduled' : 'draft', account: 'fixture_account',
+    items: ['one', 'two', 'scheduled'].map((name, index) => ({ id: name, filePath: path.join(temp, `${name}.mp4`), name, status: name === 'scheduled' ? 'scheduled' : 'draft', account: 'fixture_account',
       scheduledAt: `2099-10-20T${12+index}:00:00Z`, settings: { title: name, privacy: 'PUBLIC_TO_EVERYONE', comment: false, reuse: false, aigc: false },
       ...(name === 'scheduled' ? { receipt: { confirmed: true, warnings: ['studio_reuse_disabled_by_tiktok'] } } : {}) })) }));
   await fs.writeFile(bootstrap, `const {app} = require('electron'); app.setPath('userData', ${JSON.stringify(temp)}); require(${JSON.stringify(appMain)});`);
@@ -31,7 +32,9 @@ const path = require('node:path');
     assert.equal(actualConfig.data.clientSecret, undefined);
     const encrypted = await fs.readFile(path.join(temp, 'tiktok-credentials.enc'));
     assert.equal(encrypted.includes('test-secret-do-not-publish'), false);
-    await electron.evaluate(({ ipcMain }) => {
+    await electron.evaluate(({ ipcMain, shell }) => {
+      global.__openedQueueVideos = [];
+      shell.openPath = async file => { global.__openedQueueVideos.push(file); return ''; };
       const creator = { creator_nickname: 'Test Creator', creator_username: 'test_creator',
         privacy_level_options: ['PUBLIC_TO_EVERYONE', 'SELF_ONLY'], max_video_post_duration_sec: 60,
         comment_disabled: false, duet_disabled: true, stitch_disabled: false };
@@ -58,9 +61,21 @@ const path = require('node:path');
         ipcMain.handle(`tiktok:studio:${name}`, async (_event, input) => ({ success: true, data: fn(input) }));
       };
       studio('accounts', () => accounts);
-      studio('refreshAccounts', () => { accounts = accounts.map(entry => entry.id === 'default' ? { ...entry, username: 'fixture_account' } : entry); return accounts; });
-      studio('addAccount', () => { accounts.push({ id: 'second', username: 'second_account' }); return accounts; });
+      global.__accountRefreshes = 0;
+      studio('refreshAccounts', () => { global.__accountRefreshes++; accounts = accounts.map(entry => entry.id === 'default' ? { ...entry, username: 'fixture_account' } : entry); return accounts; });
+      studio('addAccount', (browser) => { global.__studioBrowser = browser; accounts.push({ id: 'second', username: 'second_account', browser }); return accounts; });
       studio('open', () => ({ open: true }));
+      global.__statisticsRequests = [];
+      global.__statisticsSnapshot = { version: 1, accounts: [] };
+      ipcMain.removeHandler('tiktok:statistics:get');
+      ipcMain.handle('tiktok:statistics:get', () => ({ success: true, data: global.__statisticsSnapshot }));
+      ipcMain.removeHandler('tiktok:statistics:refresh');
+      ipcMain.handle('tiktok:statistics:refresh', async (_event, id) => {
+        global.__statisticsRequests.push(id);
+        global.__statisticsSnapshot = { version: 1, accounts: [{ account: 'fixture_account', updatedAt: '2026-10-20T12:00:00Z',
+          scope: 'content_page', videos: [{ title: 'Статистика тестового ролика', views: 1200, likes: 30, comments: 2 }] }] };
+        return { success: true, data: global.__statisticsSnapshot };
+      });
       ipcMain.removeHandler('media:probe');
       ipcMain.handle('media:probe', () => ({ success: true, isImage: false,
         thumbnail: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==' }));
@@ -144,9 +159,36 @@ const path = require('node:path');
     assert.equal(defaultsPlan.data.template.title, 'Шаблон {name}');
     assert.equal(defaultsPlan.data.template.account, 'fixture_account');
     assert.equal(defaultsPlan.data.items[0].settings.title, 'Individual queue caption');
+    await page.getByRole('button', { name: 'Обновить статистику', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('.statistics-table tbody')?.textContent.includes('Статистика тестового ролика'));
+    assert.deepEqual(await electron.evaluate(() => global.__statisticsRequests), ['default']);
+    assert.equal(await page.locator('.statistics-table tbody tr').count(), 1);
+    await page.locator('.queue-statistics').screenshot({ path: path.join(os.tmpdir(), 'shotshorts-tiktok-statistics.png'), animations: 'disabled' });
+    const statisticsQueue = (await page.evaluate(() => window.api.tiktok.queue.get())).data;
+    assert.deepEqual(statisticsQueue.items, defaultsPlan.data.items);
+    await page.fill('#tq-defaults-intervalMinutes', '30');
+    await page.getByRole('button', { name: 'Сохранить и применить время ко всем черновикам', exact: true }).click();
+    await page.waitForFunction(() => document.getElementById('tq-status').textContent === 'Время публикаций обновлено у всех черновиков.');
+    const bulkPlan = (await page.evaluate(() => window.api.tiktok.queue.get())).data;
+    assert.equal(bulkPlan.items[0].scheduledAt, defaultsPlan.data.template.firstAt);
+    assert.equal(Date.parse(bulkPlan.items[1].scheduledAt) - Date.parse(bulkPlan.items[0].scheduledAt), 30 * 60000);
+    assert.deepEqual(bulkPlan.items[0].settings, defaultsPlan.data.items[0].settings);
+    assert.deepEqual(bulkPlan.items[2], defaultsPlan.data.items[2]);
     assert.equal(await page.locator('.queue-template').evaluate(node => node.open), true);
+    await page.selectOption('#tq-login-browser', 'chrome', { force: true });
     await page.getByRole('button', { name: 'Добавить аккаунт', exact: true }).click();
     await page.waitForFunction(() => [...document.querySelector('#tq-defaults-account').options].some(o => o.value === 'second_account'));
+    assert.equal(await electron.evaluate(() => global.__studioBrowser), 'chrome');
+    assert.equal(await page.inputValue('#tq-login-browser'), 'chrome');
+    assert.equal(await page.getByRole('button', { name: '@second_account', exact: true }).getAttribute('title'), 'Google Chrome');
+    const refreshesBeforeFocus = await electron.evaluate(() => global.__accountRefreshes);
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event('focus'));
+      window.dispatchEvent(new Event('focus'));
+    });
+    // A main-process round trip flushes any IPC triggered by the focus events.
+    await page.evaluate(() => window.api.tiktok.queue.accounts());
+    assert.equal(await electron.evaluate(() => global.__accountRefreshes), refreshesBeforeFocus);
     await page.locator('.queue-item[data-id="two"]').getByRole('button', { name: 'Настроить', exact: true }).click();
     await page.selectOption('#tq-tq-editor-account', 'second_account', { force: true });
     await page.getByRole('button', { name: 'Сохранить ролик', exact: true }).click();
@@ -215,11 +257,42 @@ const path = require('node:path');
     const captionPlan = await page.evaluate(() => window.api.tiktok.queue.get());
     assert.equal(captionPlan.data.items[1].settings.title, composed);
     assert.equal(captionPlan.data.items[0].settings.title, 'Individual queue caption');
+    const cleanupToggle = page.getByLabel('Автоматически убирать из списка после подтверждённой загрузки в TikTok', { exact: true });
+    assert.equal(await cleanupToggle.isChecked(), false);
+    await cleanupToggle.check();
+    await page.waitForFunction(async () => (await window.api.tiktok.queue.get()).data.autoRemoveUploaded === true);
+    const persistedPreferences = JSON.parse(await fs.readFile(path.join(temp, 'tiktok-queue.json'), 'utf8'));
+    assert.equal(persistedPreferences.autoRemoveUploaded, true);
+    assert.equal(await page.locator('.queue-item[data-id="scheduled"]').count(), 1);
+    await page.locator('.queue-delivery').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(os.tmpdir(), 'shotshorts-tiktok-controls-dark.png'), animations: 'disabled' });
+    const originalTheme = await page.evaluate(() => document.documentElement.dataset.theme);
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
+    await page.screenshot({ path: path.join(os.tmpdir(), 'shotshorts-tiktok-controls-light.png'), animations: 'disabled' });
+    await page.evaluate(theme => {
+      if (theme) document.documentElement.dataset.theme = theme;
+      else delete document.documentElement.dataset.theme;
+    }, originalTheme);
+    await page.locator('.queue-item[data-id="one"]').getByRole('button', { name: 'Открыть видео', exact: true }).click();
+    await page.waitForFunction(() => document.getElementById('tq-status').textContent === 'Видео открыто в видеоплеере.');
+    assert.deepEqual(await electron.evaluate(() => global.__openedQueueVideos), [path.join(temp, 'one.mp4')]);
+    assert.equal((await page.evaluate(() => window.api.tiktok.queue.openVideo('unknown-id'))).error, 'invalid_video_file');
+    await fs.unlink(path.join(temp, 'two.mp4'));
+    await page.locator('.queue-item[data-id="two"]').getByRole('button', { name: 'Открыть видео', exact: true }).click();
+    await page.waitForFunction(() => document.getElementById('tq-error').textContent === 'Файл видео не найден. Возможно, он перемещён или удалён.');
+    assert.equal((await electron.evaluate(() => global.__openedQueueVideos)).length, 1);
     const scheduledCard = page.locator('.queue-item[data-id="scheduled"]');
     assert.equal(await scheduledCard.getByText('TikTok отключил повторное использование для этого видео. Ролик запланирован с выключенным повторным использованием.', { exact: true }).count(), 1);
     assert.equal(await scheduledCard.getByRole('button', { name: 'Настроить', exact: true }).count(), 0);
+    await scheduledCard.getByRole('button', { name: 'Убрать из плана', exact: true }).scrollIntoViewIfNeeded();
+    const beforeRemovalScroll = await page.locator('#tab-tiktok').evaluate(element => element.scrollTop);
+    assert.ok(beforeRemovalScroll > 100, 'Exercise removal while scrolled down');
     await scheduledCard.getByRole('button', { name: 'Убрать из плана', exact: true }).click();
     await page.waitForFunction(() => !document.querySelector('.queue-item[data-id="scheduled"]'));
+    await page.waitForFunction(() => !document.querySelector('#tiktok-queue-panel.queue-busy'));
+    const afterRemovalScroll = await page.locator('#tab-tiktok').evaluate(element => ({ top: element.scrollTop, max: element.scrollHeight - element.clientHeight }));
+    assert.ok(Math.abs(afterRemovalScroll.top - Math.min(beforeRemovalScroll, afterRemovalScroll.max)) <= 2,
+      `Removal moved the list: before=${beforeRemovalScroll}, after=${JSON.stringify(afterRemovalScroll)}`);
     const removedPlan = await page.evaluate(() => window.api.tiktok.queue.get());
     assert.deepEqual(removedPlan.data.items.map(item => item.id), ['one', 'two']);
     assert.deepEqual(await electron.evaluate(() => global.__tikTokPublished), published);

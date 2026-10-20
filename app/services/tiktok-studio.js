@@ -3,6 +3,8 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { chromium } = require('playwright');
 const { abortableSleep } = require('./cancellation');
+const { readStudioStatistics, writeStatisticsDiagnostic } = require('./tiktok-statistics');
+const { launchStudioLogin, isBrowserProfileOpen } = require('./tiktok-login-browser');
 
 const UPLOAD = 'https://www.tiktok.com/tiktokstudio/upload';
 const privacyNames = {
@@ -423,21 +425,29 @@ async function readStudioAccount(page) {
   finally { await result.dispose(); }
 }
 
-function createProfileDriver({ profilePath, launch = (profile, options) => chromium.launchPersistentContext(profile, options) }) {
+function createProfileDriver({ profilePath, statisticsDiagnosticPath, browser = 'msedge', loginLaunch = launchStudioLogin, profileOpen = isBrowserProfileOpen, launch = (profile, options) => chromium.launchPersistentContext(profile, options) }) {
   let context;
   let page;
   let opening;
+  let loginSession;
+  const isLoginOpen = async () => !context && (!!loginSession?.isRunning() || await profileOpen(profilePath, browser));
+  async function ensureContext() {
+    if (await isLoginOpen()) throw new Error('studio_login_window_open');
+    if (!context) {
+      try { context = await launch(profilePath, { channel: browser, headless: false, viewport: null,
+        chromiumSandbox: true, timezoneId: Intl.DateTimeFormat().resolvedOptions().timeZone }); }
+      catch { throw new Error(browser === 'chrome' ? 'studio_chrome_unavailable' : 'studio_edge_unavailable'); }
+      context.on('close', () => { context = null; page = null; });
+    }
+  }
   async function open() {
+    if (await isLoginOpen()) throw new Error('studio_login_window_open');
     if (opening) return opening;
     opening = (async () => {
-      if (!context) {
-        try { context = await launch(profilePath, { channel: 'msedge', headless: false, viewport: null,
-          chromiumSandbox: true, timezoneId: Intl.DateTimeFormat().resolvedOptions().timeZone }); }
-        catch { throw new Error('studio_edge_unavailable'); }
-        context.on('close', () => { context = null; page = null; });
-      }
+      await ensureContext();
       if (!page || page.isClosed()) {
-        page = await context.newPage(); page.setDefaultTimeout(20000);
+        page = context.pages?.().find(candidate => candidate.url() === 'about:blank') || await context.newPage();
+        page.setDefaultTimeout(20000);
         await page.goto(UPLOAD, { waitUntil: 'domcontentloaded', timeout: 60000 });
       }
       await page.bringToFront();
@@ -446,18 +456,60 @@ function createProfileDriver({ profilePath, launch = (profile, options) => chrom
     return opening;
   }
   return {
-    open,
+    isLoginOpen,
+    async openLogin() {
+      if (await isLoginOpen()) return { open: true };
+      // Release the profile before the user signs in through the ordinary browser.
+      await context?.close();
+      context = null; page = null;
+      loginSession = await loginLaunch(profilePath, browser);
+      return { open: true };
+    },
+    async statistics(expectedAccount) {
+      let probe;
+      let probeContext;
+      let stage = 'browser';
+      const ownsContext = !context;
+      try {
+        await ensureContext(); probeContext = context;
+        probe = (ownsContext && context.pages?.().find(candidate => candidate.url() === 'about:blank')) || await context.newPage();
+        probe.setDefaultTimeout(20000);
+        stage = 'navigation';
+        await probe.goto('https://www.tiktok.com/tiktokstudio/content', { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await probe.bringToFront();
+        stage = 'account';
+        const account = await readStudioAccount(probe).catch(() => { throw new Error('studio_account_unavailable'); });
+        if (account !== expectedAccount) throw new Error('studio_account_mismatch');
+        stage = 'counters';
+        return await readStudioStatistics(probe, account);
+      } catch (error) {
+        await writeStatisticsDiagnostic(probe, expectedAccount, stage, error, statisticsDiagnosticPath);
+        throw error;
+      } finally {
+        if (ownsContext) await probeContext?.close().catch(() => {});
+        else await probe?.close().catch(() => {});
+      }
+    },
     async account() {
       // A login may finish in a different tab. Read a fresh Studio page in the
       // same context so all sign-in tabs share cookies, without changing them.
       let probe;
+      let probeContext;
+      const ownsContext = !context;
       try {
-        if (!context) await open();
-        probe = await context.newPage();
+        await ensureContext();
+        probeContext = context;
+        probe = (ownsContext && context.pages?.().find(candidate => candidate.url() === 'about:blank')) || await context.newPage();
         await probe.goto(UPLOAD, { waitUntil: 'domcontentloaded', timeout: 30000 });
         return await readStudioAccount(probe);
-      } catch { return null; }
-      finally { await probe?.close().catch(() => {}); }
+      } catch (error) {
+        if (['studio_login_window_open', 'studio_browser_state_unavailable'].includes(error.message)) throw error;
+        return null;
+      }
+      finally {
+        if (ownsContext) await probeContext?.close().catch(() => {});
+        else await probe?.close().catch(() => {});
+      }
     },
     async upload(item, signal) {
       await open();
@@ -489,12 +541,14 @@ function createProfileDriver({ profilePath, launch = (profile, options) => chrom
 
 // Existing users keep their original browser profile. Additional accounts get
 // separate persistent profiles; only public usernames and profile IDs are stored here.
-function createStudioDriver({ profilePath, launch }) {
+function createStudioDriver({ profilePath, launch, loginLaunch, profileOpen }) {
   const registryPath = path.join(path.dirname(profilePath), 'tiktok-studio-accounts.json');
   const drivers = new Map();
   let entries;
   let serial = Promise.resolve();
   let uploading = false;
+  let uploadFinished = Promise.resolve();
+  let finishUpload;
   const transact = (fn) => {
     const operation = serial.then(async () => {
       if (!entries) {
@@ -502,7 +556,8 @@ function createStudioDriver({ profilePath, launch }) {
           const saved = JSON.parse(await fs.readFile(registryPath, 'utf8'));
           if (!Array.isArray(saved) || saved.some(e => !e ||
             !/^(default|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.test(e.id) ||
-            (e.username !== '' && !/^[a-zA-Z0-9_.]{2,64}$/.test(e.username)))) throw new Error();
+            (e.username !== '' && !/^[a-zA-Z0-9_.]{2,64}$/.test(e.username)) ||
+            (e.browser !== undefined && !['msedge', 'chrome'].includes(e.browser)))) throw new Error();
           entries = saved;
         } catch (error) {
           if (error.code !== 'ENOENT') throw new Error('studio_accounts_unreadable');
@@ -517,7 +572,8 @@ function createStudioDriver({ profilePath, launch }) {
   };
   const driver = (entry) => {
     if (!drivers.has(entry.id)) drivers.set(entry.id, createProfileDriver({
-      profilePath: entry.id === 'default' ? profilePath : path.join(path.dirname(profilePath), 'tiktok-studio-accounts', entry.id), launch
+      statisticsDiagnosticPath: path.join(path.dirname(profilePath), 'tiktok-statistics-diagnostic.json'),
+      profilePath: entry.id === 'default' ? profilePath : path.join(path.dirname(profilePath), 'tiktok-studio-accounts', entry.id), browser: entry.browser || 'msedge', launch, loginLaunch, profileOpen
     }));
     return drivers.get(entry.id);
   };
@@ -529,14 +585,18 @@ function createStudioDriver({ profilePath, launch }) {
   const accountList = () => {
     const seen = new Set();
     return structuredClone(entries.filter(entry => {
-      const key = entry.username.toLowerCase();
+      const key = entry.username ? entry.username.toLowerCase() : `pending:${entry.browser || 'msedge'}`;
       if (seen.has(key)) return false;
       seen.add(key); return true;
     }));
   };
   async function detectAccounts() {
-    let detected = false;
     for (const entry of entries) {
+      if (await driver(entry).isLoginOpen()) throw new Error('studio_login_window_open');
+    }
+    let detected = false;
+    const visibleIds = new Set(accountList().map(entry => entry.id));
+    for (const entry of entries.filter(entry => visibleIds.has(entry.id))) {
       const username = await driver(entry).account();
       if (username) { entry.username = username; detected = true; }
     }
@@ -545,18 +605,27 @@ function createStudioDriver({ profilePath, launch }) {
   }
   return {
     accounts: () => transact(async () => accountList()),
+    statistics: (id) => transact(async () => {
+      // Upload completion does not need this transaction lock. Waiting here
+      // keeps the next upload queued until the separate statistics tab closes.
+      await uploadFinished;
+      const entry = entries.find(item => item.id === id && item.username);
+      if (!entry) throw new Error('studio_account_unavailable');
+      return driver(entry).statistics(entry.username);
+    }),
     open: (id = 'default') => transact(async () => {
       if (uploading) throw new Error('operation_in_progress');
       const entry = entries.find(e => e.id === id);
       if (!entry) throw new Error('studio_account_unavailable');
-      return driver(entry).open();
+      return driver(entry).openLogin();
     }),
-    addAccount: () => transact(async () => {
+    addAccount: (browser = 'msedge') => transact(async () => {
       if (uploading) throw new Error('operation_in_progress');
+      if (!['msedge', 'chrome'].includes(browser)) throw new Error('studio_browser_invalid');
       // Reuse an unfinished sign-in instead of creating unused profiles on each click.
-      let entry = entries.find(e => !e.username);
-      if (!entry) { entry = { id: randomUUID(), username: '' }; entries.push(entry); await save(); }
-      await driver(entry).open();
+      let entry = entries.find(e => !e.username && (e.browser || 'msedge') === browser);
+      if (!entry) { entry = { id: randomUUID(), username: '', browser }; entries.push(entry); await save(); }
+      await driver(entry).openLogin();
       return accountList();
     }),
     refreshAccounts: () => transact(async () => {
@@ -571,10 +640,11 @@ function createStudioDriver({ profilePath, launch }) {
         const entry = entries.find(e => e.username === item.account) || entries.find(e => e.id === 'default' && !e.username);
         if (!entry) throw new Error('studio_account_unavailable');
         uploading = true;
+        uploadFinished = new Promise(resolve => { finishUpload = resolve; });
         return driver(entry);
       });
       try { return await target.upload(item, signal); }
-      finally { uploading = false; }
+      finally { uploading = false; finishUpload(); }
     },
     async close() { await serial; await Promise.all([...drivers.values()].map(d => d.close())); }
   };

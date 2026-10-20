@@ -44,6 +44,38 @@ test('each clip keeps its own time and settings across a restart', async () => {
   assert.equal(actual.items[1].scheduledAt, '2026-10-20T13:00:00.000Z');
 });
 
+test('bulk timing updates drafts, skips occupied slots, and keeps individual settings', async () => {
+  const h = harness(); await h.queue.template(template);
+  const plan = await h.queue.addGenerated([clip('scheduled'), clip('one'), clip('two')]);
+  await h.queue.send({ ids: [plan.items[0].id], consent: true }); await h.queue.idle();
+  const before = await h.queue.get();
+  const actual = await h.queue.template({ ...template, intervalMinutes: 30, applySchedule: true, title: 'New template', privacy: 'SELF_ONLY' });
+  assert.deepEqual(actual.items[0], before.items[0]);
+  assert.equal(actual.items[1].scheduledAt, '2026-10-20T12:30:00.000Z');
+  assert.equal(actual.items[2].scheduledAt, '2026-10-20T13:00:00.000Z');
+  for (const index of [1, 2]) {
+    assert.deepEqual(actual.items[index].settings, before.items[index].settings);
+    assert.equal(actual.items[index].account, before.items[index].account);
+    assert.equal(actual.items[index].status, 'draft');
+  }
+  assert.equal(h.sent.length, 1);
+  const restarted = createTikTokQueue({ storage: h.storage });
+  assert.deepEqual((await restarted.get()).items, actual.items);
+});
+
+test('bulk timing works before account/privacy selection and invalid timing changes nothing', async () => {
+  const h = harness(); await h.queue.addGenerated([clip('one'), clip('two')]);
+  const input = { ...template, account: '', privacy: '', applySchedule: true };
+  const before = h.saved();
+  for (const firstAt of ['', '2020-01-01T00:00:00Z', '2026-10-20T12:01:00Z']) {
+    await assert.rejects(h.queue.template({ ...input, firstAt }));
+    assert.deepEqual(h.saved(), before);
+  }
+  const actual = await h.queue.template(input);
+  assert.deepEqual(actual.items.map(item => item.scheduledAt), ['2026-10-20T12:00:00.000Z', '2026-10-20T13:00:00.000Z']);
+  assert.equal(h.sent.length, 0);
+});
+
 test('scheduled clips can be removed locally without affecting other plans or causing another upload', async () => {
   const h = harness(); await h.queue.template(template);
   const state = await h.queue.addGenerated([clip('one'), clip('two')]);
@@ -91,6 +123,48 @@ test('confirmed receipts preserve TikTok restriction notices across restart', as
   assert.equal(item.status, 'scheduled');
   assert.equal(item.settings.reuse, true);
   assert.deepEqual(item.receipt.warnings, warnings);
+});
+
+test('automatic removal is opt-in, persists independently, and leaves existing cards alone', async () => {
+  const h = harness(); await h.queue.template(template);
+  const plan = await h.queue.addGenerated([clip('existing')]);
+  assert.equal(plan.autoRemoveUploaded, false);
+  await h.queue.send({ ids: plan.items.map(item => item.id), consent: true }); await h.queue.idle();
+  await h.queue.preferences({ autoRemoveUploaded: true });
+  const restarted = createTikTokQueue({ storage: h.storage });
+  const actual = await restarted.get();
+  assert.equal(actual.autoRemoveUploaded, true);
+  assert.equal(actual.items[0].status, 'scheduled');
+  await assert.rejects(h.queue.preferences({ autoRemoveUploaded: 'true' }), /invalid_queue_preferences/);
+  await h.queue.preferences({ autoRemoveUploaded: false });
+  assert.equal((await h.queue.get()).autoRemoveUploaded, false);
+});
+
+test('automatic removal continues the queue and preserves deduplication and future slots after restart', async () => {
+  const h = harness(); await h.queue.template(template);
+  await h.queue.preferences({ autoRemoveUploaded: true });
+  const plan = await h.queue.addGenerated([clip('one'), clip('two')]);
+  await h.queue.send({ ids: plan.items.map(item => item.id), consent: true }); await h.queue.idle();
+  const completed = await h.queue.get();
+  assert.equal(completed.items.length, 0);
+  assert.equal(completed.completedUploads.length, 2);
+  assert.equal(h.sent.length, 2);
+  assert.equal(completed.paused, false);
+  const restarted = createTikTokQueue({ storage: h.storage, now: () => now });
+  const next = await restarted.addGenerated([clip('one'), clip('two'), clip('three')]);
+  assert.equal(next.items.length, 1);
+  assert.equal(next.items[0].scheduledAt, '2026-10-20T14:00:00.000Z');
+  assert.equal(next.items[0].settings.title, '3. three #test');
+});
+
+test('automatic removal keeps unconfirmed uploads for review', async () => {
+  const h = harness({ upload: async () => ({ confirmed: false }) });
+  await h.queue.template(template); await h.queue.preferences({ autoRemoveUploaded: true });
+  const plan = await h.queue.addGenerated([clip('uncertain')]);
+  await h.queue.send({ ids: plan.items.map(item => item.id), consent: true }); await h.queue.idle();
+  const actual = await h.queue.get();
+  assert.equal(actual.items[0].status, 'needs_attention');
+  assert.equal(actual.completedUploads.length, 0);
 });
 
 test('account mismatch diagnostics survive restart and clear on return to draft', async () => {
