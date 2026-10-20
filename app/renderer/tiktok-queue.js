@@ -36,14 +36,24 @@
       studio_layout_changed: 'Форма TikTok изменилась. Проверьте открытое окно.',
       removeLocalHint: '«Убрать из плана» удаляет запись только из приложения. Файл и публикация в TikTok сохраняются.',
       studio_upload_timeout: 'Не удалось дождаться формы загрузки TikTok Studio. Проверьте вход в аккаунт.',
+      studio_upload_not_ready: 'Видео или форма TikTok не стали готовы за 30 минут. Проверьте загрузку и сообщения TikTok.',
+      studio_upload_navigation_timeout: 'Не удалось открыть форму загрузки TikTok для следующего ролика.',
+      studio_file_input_timeout: 'Страница TikTok открыта, но поле выбора видео не появилось.',
+      studio_schedule_button_disabled: 'Кнопка «Запланировать» осталась недоступной после ожидания 30 минут. Проверьте загрузку, обработку видео и сообщения TikTok.',
+      expectedAccount: 'Аккаунт в плане', actualAccount: 'Аккаунт на странице TikTok', unknownAccount: 'не определён',
       studio_caption_timeout: 'Не удалось заполнить описание. Проверьте загрузку видео и всплывающие окна TikTok.',
       studio_schedule_timeout: 'Не удалось включить расписание. Проверьте переключатель времени публикации в TikTok.',
       studio_date_timeout: 'Не удалось выбрать дату публикации в календаре TikTok.',
       studio_time_timeout: 'Не удалось выбрать время публикации в TikTok.',
+      studio_time_open_timeout: 'Не удалось открыть список времени в TikTok.',
+      studio_time_hour_timeout: 'Не удалось выбрать час публикации в списке времени TikTok.',
+      studio_time_minute_timeout: 'Не удалось выбрать минуты публикации в списке времени TikTok.',
+      studio_time_close_timeout: 'Время выбрано, но не удалось закрыть список времени. Проверьте всплывающие окна TikTok.',
       studio_privacy_timeout: 'Не удалось выбрать видимость публикации в TikTok.',
       studio_options_timeout: 'Не удалось открыть или изменить дополнительные настройки TikTok.',
       studio_ai_label_timeout: 'Не удалось найти переключатель «Контент, сгенерированный ИИ» в раскрытых настройках TikTok.',
-      studio_reuse_unavailable: 'TikTok отключил повторное использование для этого видео, например из-за длительности больше 60 секунд. Верните ролик в план и отключите «Разрешить повторное использование» в его настройках.',
+      studio_reuse_unavailable: 'Предыдущая версия остановила отправку из-за недоступного повторного использования. Верните ролик в план и отправьте снова: теперь эта настройка не блокирует публикацию.',
+      studio_reuse_disabled_by_tiktok: 'TikTok отключил повторное использование для этого видео. Ролик запланирован с выключенным повторным использованием.',
       studio_account_mismatch: 'В TikTok открыт другой аккаунт. Загрузка остановлена.',
       studio_setting_unavailable: 'TikTok не разрешает одну из выбранных настроек для этого видео.',
       studio_settings_not_applied: 'TikTok не применил выбранные настройки. Отправка остановлена.',
@@ -72,14 +82,24 @@
       reconcile: 'Check this clip in TikTok Studio before retrying; automatic retries are blocked.', confirmed: 'Already scheduled on TikTok', notSent: 'Not scheduled — return to plan',
       localOnly: 'No date', saved: 'Plan saved.', changed: 'Settings changed. Save before sending.', working: 'Working…', browserOpened: 'TikTok Studio is open. Sign in to the intended account, then return to ShotShorts.',
       studio_upload_timeout: 'The TikTok Studio upload form did not appear. Check that you are signed in.',
+      studio_upload_not_ready: 'The video or TikTok form was not ready within 30 minutes. Check upload progress and TikTok messages.',
+      studio_upload_navigation_timeout: 'Could not open the TikTok upload form for the next video.',
+      studio_file_input_timeout: 'TikTok opened, but the video file input did not appear.',
+      studio_schedule_button_disabled: 'Schedule remained disabled after waiting 30 minutes. Check video upload, processing and TikTok messages.',
+      expectedAccount: 'Account in plan', actualAccount: 'Account on TikTok page', unknownAccount: 'unknown',
       studio_caption_timeout: 'Could not fill the description. Check video upload progress and TikTok popups.',
       studio_schedule_timeout: 'Could not enable scheduling. Check the publication time control in TikTok.',
       studio_date_timeout: 'Could not select the publication date in TikTok.',
       studio_time_timeout: 'Could not select the publication time in TikTok.',
+      studio_time_open_timeout: 'Could not open the TikTok time picker.',
+      studio_time_hour_timeout: 'Could not select the publication hour in TikTok.',
+      studio_time_minute_timeout: 'Could not select the publication minutes in TikTok.',
+      studio_time_close_timeout: 'The time was selected, but its picker could not be dismissed. Check for TikTok popups.',
       studio_privacy_timeout: 'Could not select publication visibility in TikTok.',
       studio_options_timeout: 'Could not open or change additional TikTok settings.',
       studio_ai_label_timeout: 'Could not find the AI-generated content switch in the expanded TikTok settings.',
-      studio_reuse_unavailable: 'TikTok disabled content reuse for this video, for example because it exceeds 60 seconds. Return the clip to the plan and turn off Allow reuse of content in its settings.',
+      studio_reuse_unavailable: 'The previous version stopped because reuse was unavailable. Return the clip to the plan and send it again: this restriction no longer blocks submission.',
+      studio_reuse_disabled_by_tiktok: 'TikTok disabled reuse for this video. The clip was scheduled with reuse turned off.',
       removeLocalHint: 'Remove from plan only removes the entry from this app. The file and TikTok publication are kept.'
     }
   };
@@ -358,6 +378,8 @@
       card.append(el('p', `${item.scheduledAt ? new Date(item.scheduledAt).toLocaleString(lang) : tr('localOnly')} · ${tr(item.settings.privacy || 'choose')}${item.account ? ` · @${item.account}` : ''}`, 'hint'));
       if (item.settings.title) card.append(el('p', item.settings.title, 'queue-caption'));
       if (item.error) card.append(el('p', tr(item.error), 'warning'));
+      if (item.accountCheck) card.append(el('p', `${tr('expectedAccount')}: @${item.accountCheck.expected} · ${tr('actualAccount')}: ${item.accountCheck.actual ? `@${item.accountCheck.actual}` : tr('unknownAccount')}`, 'hint'));
+      for (const warning of item.receipt?.warnings || []) card.append(el('p', tr(warning), 'hint'));
       const actions = el('div', '', 'tiktok-actions'); card.append(actions);
       if (item.status === 'draft') {
         actions.append(button('edit', () => { if (!canLeave()) return; selected = item.id; dirty = false; render(); document.getElementById('tq-editor')?.scrollIntoView({ block: 'nearest' }); }));

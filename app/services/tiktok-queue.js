@@ -86,6 +86,7 @@ function createTikTokQueue({ storage, upload, notify = () => {}, now = Date.now 
           const candidate = next.items.find((i) => i.status === 'ready');
           if (!candidate) return null;
           candidate.status = 'uploading';
+          delete candidate.accountCheck;
           return structuredClone(candidate);
         });
         if (!item) return;
@@ -101,6 +102,12 @@ function createTikTokQueue({ storage, upload, notify = () => {}, now = Date.now 
             const current = next.items.find((i) => i.id === item.id);
             current.status = 'needs_attention';
             current.error = /^[a-z_]{1,100}$/.test(error.message) ? error.message : 'studio_needs_attention';
+            const check = error.accountCheck;
+            if (current.error === 'studio_account_mismatch' && check &&
+              /^[a-zA-Z0-9_.]{2,64}$/.test(check.expected) && /^(?:[a-zA-Z0-9_.]{2,64})?$/.test(check.actual) &&
+              ['before_upload', 'before_submit'].includes(check.phase)) {
+              current.accountCheck = { expected: check.expected, actual: check.actual, phase: check.phase };
+            }
             next.paused = true;
           });
           return;
@@ -195,6 +202,7 @@ function createTikTokQueue({ storage, upload, notify = () => {}, now = Date.now 
       item.account = String(input.account || '').trim().replace(/^@/, '');
       if (item.account && !/^[a-zA-Z0-9_.]{2,64}$/.test(item.account)) throw new Error('studio_account_required');
       delete item.error;
+      delete item.accountCheck;
     }); },
     remove(id) { return transact((next) => {
       const item = next.items.find((entry) => entry.id === id);
@@ -206,7 +214,7 @@ function createTikTokQueue({ storage, upload, notify = () => {}, now = Date.now 
       const items = input.ids.map((id) => next.items.find((item) => item.id === id));
       if (items.some((item) => !item || item.status !== 'draft')) throw new Error('queue_item_not_editable');
       items.forEach(validateItem);
-      items.forEach((item) => { item.status = 'ready'; delete item.error; });
+      items.forEach((item) => { item.status = 'ready'; delete item.error; delete item.accountCheck; });
       next.paused = false;
     }).then((result) => { start(); return result; }); },
     pause() {
@@ -217,7 +225,7 @@ function createTikTokQueue({ storage, upload, notify = () => {}, now = Date.now 
     reconcile(input) { return transact((next) => {
       const item = next.items.find((i) => i.id === input?.id);
       if (item?.status !== 'needs_attention' || !['scheduled', 'draft'].includes(input.status)) throw new Error('queue_item_not_editable');
-      item.status = input.status; item.reconciledAt = new Date(now()).toISOString(); delete item.error;
+      item.status = input.status; item.reconciledAt = new Date(now()).toISOString(); delete item.error; delete item.accountCheck;
     }); },
     async idle() { await worker; },
     shutdown() { stopped = true; controller?.abort(); }

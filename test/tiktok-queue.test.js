@@ -79,6 +79,31 @@ test('new clips enter the plan even when it contains a scheduled clip', async ()
   const actual = await h.queue.addGenerated([clip('two'), clip('three')]);
   assert.deepEqual(actual.items.map(item => item.status), ['scheduled', 'draft', 'draft']);
 });
+
+test('confirmed receipts preserve TikTok restriction notices across restart', async () => {
+  const warnings = ['studio_reuse_disabled_by_tiktok'];
+  const h = harness({ upload: async () => ({ confirmed: true, warnings }) });
+  await h.queue.template({ ...template, reuse: true });
+  const state = await h.queue.addGenerated([clip('restricted')]);
+  await h.queue.send({ ids: [state.items[0].id], consent: true }); await h.queue.idle();
+  const restarted = createTikTokQueue({ storage: h.storage });
+  const item = (await restarted.get()).items[0];
+  assert.equal(item.status, 'scheduled');
+  assert.equal(item.settings.reuse, true);
+  assert.deepEqual(item.receipt.warnings, warnings);
+});
+
+test('account mismatch diagnostics survive restart and clear on return to draft', async () => {
+  const accountCheck = { expected: 'creator', actual: 'another_creator', phase: 'before_submit' };
+  const h = harness({ upload: async () => { throw Object.assign(new Error('studio_account_mismatch'), { accountCheck }); } });
+  await h.queue.template(template);
+  const state = await h.queue.addGenerated([clip('mismatch')]);
+  await h.queue.send({ ids: [state.items[0].id], consent: true }); await h.queue.idle();
+  const restarted = createTikTokQueue({ storage: h.storage });
+  assert.deepEqual((await restarted.get()).items[0].accountCheck, accountCheck);
+  const reconciled = await restarted.reconcile({ id: state.items[0].id, status: 'draft' });
+  assert.equal(reconciled.items[0].accountCheck, undefined);
+});
 test('consent is required and scheduled jobs are uploaded now, not at publication time', async () => {
   const h = harness(); await h.queue.template(template);
   const state = await h.queue.addGenerated([clip('one'), clip('two')]);

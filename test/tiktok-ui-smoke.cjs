@@ -13,7 +13,8 @@ const path = require('node:path');
   await fs.writeFile(path.join(temp, 'tiktok-queue.json'), JSON.stringify({ version: 1, paused: false,
     template: { firstAt: '', title: '{name}', intervalMinutes: 60, privacy: '', account: '', autoUpload: false },
     items: ['one', 'two', 'scheduled'].map((name, index) => ({ id: name, filePath: `C:\\fixture\\${name}.mp4`, name, status: name === 'scheduled' ? 'scheduled' : 'draft', account: 'fixture_account',
-      scheduledAt: `2099-10-20T${12+index}:00:00Z`, settings: { title: name, privacy: 'PUBLIC_TO_EVERYONE', comment: false, reuse: false, aigc: false } })) }));
+      scheduledAt: `2099-10-20T${12+index}:00:00Z`, settings: { title: name, privacy: 'PUBLIC_TO_EVERYONE', comment: false, reuse: false, aigc: false },
+      ...(name === 'scheduled' ? { receipt: { confirmed: true, warnings: ['studio_reuse_disabled_by_tiktok'] } } : {}) })) }));
   await fs.writeFile(bootstrap, `const {app} = require('electron'); app.setPath('userData', ${JSON.stringify(temp)}); require(${JSON.stringify(appMain)});`);
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
   let electron;
@@ -215,12 +216,22 @@ const path = require('node:path');
     assert.equal(captionPlan.data.items[1].settings.title, composed);
     assert.equal(captionPlan.data.items[0].settings.title, 'Individual queue caption');
     const scheduledCard = page.locator('.queue-item[data-id="scheduled"]');
+    assert.equal(await scheduledCard.getByText('TikTok отключил повторное использование для этого видео. Ролик запланирован с выключенным повторным использованием.', { exact: true }).count(), 1);
     assert.equal(await scheduledCard.getByRole('button', { name: 'Настроить', exact: true }).count(), 0);
     await scheduledCard.getByRole('button', { name: 'Убрать из плана', exact: true }).click();
     await page.waitForFunction(() => !document.querySelector('.queue-item[data-id="scheduled"]'));
     const removedPlan = await page.evaluate(() => window.api.tiktok.queue.get());
     assert.deepEqual(removedPlan.data.items.map(item => item.id), ['one', 'two']);
     assert.deepEqual(await electron.evaluate(() => global.__tikTokPublished), published);
+    const diagnosticPlan = structuredClone(removedPlan.data);
+    Object.assign(diagnosticPlan.items[0], { status: 'needs_attention', error: 'studio_account_mismatch',
+      accountCheck: { expected: 'fixture_account', actual: 'other_account', phase: 'before_submit' } });
+    await electron.evaluate(({ ipcMain }, fixture) => {
+      ipcMain.removeHandler('tiktok:queue:get');
+      ipcMain.handle('tiktok:queue:get', () => ({ success: true, data: fixture }));
+    }, diagnosticPlan);
+    await page.evaluate(() => window.TikTokQueuePanel.refresh());
+    assert.equal(await page.locator('.queue-item[data-id="one"]').getByText('Аккаунт в плане: @fixture_account · Аккаунт на странице TikTok: @other_account', { exact: true }).count(), 1);
     await electron.evaluate(({ ipcMain }) => {
       ipcMain.removeHandler('tiktok:studio:refreshAccounts');
       ipcMain.handle('tiktok:studio:refreshAccounts', () => ({ success: false, error: 'studio_account_unavailable' }));
