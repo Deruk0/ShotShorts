@@ -1436,12 +1436,18 @@ input[type="range"].app-slider::-moz-range-thumb:hover { background: var(--accen
 .queue-statistics > .hint { margin-top: 8px; }
 .queue-statistics .tiktok-actions { align-items: end; }
 .queue-statistics .field-group { margin: 0; min-width: 180px; flex: 1 1 220px; }
-.statistics-table-scroll { overflow-x: auto; max-height: 380px; margin-top: 16px; }
-.statistics-table { border-collapse: collapse; width: 100%; font-size: 12px; }
-.statistics-table :is(th, td) { border-bottom: 1px solid var(--border-color); padding: 10px 12px; text-align: right; }
-.statistics-table th { color: var(--text-secondary); font-weight: 600; background: var(--bg-secondary); position: sticky; top: 0; }
-.statistics-table :is(th, td):first-child { text-align: left; min-width: 180px; overflow-wrap: anywhere; }
-.statistics-table td:not(:first-child) { font-family: var(--font-mono); white-space: nowrap; }
+.statistics-dates, .statistics-metrics { display: grid; gap: 12px; margin: 16px 0; }
+.statistics-dates { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.statistics-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.statistics-summary { min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-secondary); }
+.statistics-summary .hint { margin: 0; }
+.statistics-summary time { color: var(--text-primary); font-size: 13px; overflow-wrap: anywhere; }
+.statistics-summary strong { font: 600 24px var(--font-mono); color: var(--text-primary); }
+@media (max-width: 900px) {
+  .statistics-dates { grid-template-columns: 1fr; }
+  .statistics-summary { padding: 12px; }
+  .statistics-summary strong { font-size: 20px; }
+}
 
 .caption-presets-dialog .warning:empty, .caption-presets-dialog [role="status"]:empty { display: none; }
 .queue-caption { font-size: 12px; line-height: 1.5; margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; user-select: text; }

@@ -1,6 +1,6 @@
 {
   "name": "shotshorts",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "ShotShorts - AI-powered short video generator from long videos with ADHD background footage",
   "scripts": {
     "test": "node --test test/*.test.js",

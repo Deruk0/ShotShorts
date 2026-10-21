@@ -14,7 +14,7 @@ contextBridge.exposeInMainWorld('api', {
       removeHashtagPreset: (id) => ipcRenderer.invoke('tiktok:queue:removeHashtagPreset', id),
       get: () => ipcRenderer.invoke('tiktok:queue:get'),
       statistics: () => ipcRenderer.invoke('tiktok:statistics:get'),
-      refreshStatistics: (id) => ipcRenderer.invoke('tiktok:statistics:refresh', id),
+      refreshStatistics: (input) => ipcRenderer.invoke('tiktok:statistics:refresh', input),
       preferences: (input) => ipcRenderer.invoke('tiktok:queue:preferences', input),
       openVideo: (id) => ipcRenderer.invoke('tiktok:queue:openVideo', id),
       template: (input) => ipcRenderer.invoke('tiktok:queue:template', input),

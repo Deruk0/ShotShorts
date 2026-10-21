@@ -1,5 +1,6 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const PERIODS = [7, 28, 60, 365];
 
 function parseMetric(value) {
   const text = String(value).toLowerCase().replace(/[\s\u00a0\u202f]/g, '');
@@ -12,104 +13,121 @@ function parseMetric(value) {
   return Number.isSafeInteger(result) ? result : null;
 }
 
-// Runs in the page. Read only the visible content list; do not call private APIs.
-function inspectStatistics(options) {
-  const diagnostic = options?.diagnostic === true;
-  const visible = element => element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden';
-  const text = element => (element.innerText || '').replace(/\s+/g, ' ').trim();
-  const elements = [...document.querySelectorAll('body *')].filter(visible);
-  const leaves = elements.filter(element => ![...element.children].some(child => visible(child) && text(child) === text(element)));
-  const names = [/^(Просмотры|Views)$/i, /^(Лайки|Likes)$/i, /^(Комментарии|Comments)$/i];
-  const headers = names.map(name => leaves.filter(element => name.test(text(element))));
-  const aligned = headers[0].flatMap(views => headers[1].flatMap(likes => headers[2].map(comments => [views, likes, comments])))
-    .filter(group => {
-      const boxes = group.map(element => element.getBoundingClientRect());
-      return boxes[0].left < boxes[1].left && boxes[1].left < boxes[2].left &&
-        Math.max(...boxes.map(box => box.top)) - Math.min(...boxes.map(box => box.top)) < 16;
-    }).sort((a, b) => b[0].getBoundingClientRect().top - a[0].getBoundingClientRect().top);
-  if (!aligned.length) return diagnostic ? { headers: headers.map(entries => entries.length), aligned: 0, rows: 0 } : false;
-  const boxes = aligned[0].map(element => element.getBoundingClientRect());
-  const centers = boxes.map(box => box.left + box.width / 2);
-  const bounds = aligned[0].map((header, index) => {
-    let cell = header.closest('th, [role="columnheader"]');
-    if (!cell) {
-      cell = header;
-      for (let level = 0; cell.parentElement && level < 5; level++, cell = cell.parentElement) {
-        const siblings = [...cell.parentElement.children].filter(visible);
-        if (siblings.filter(element => names.some(name => name.test(text(element)))).length >= 2) break;
-      }
-      // No identifiable column container: use midpoints between the headers,
-      // never the start of a potentially right-aligned text label.
-      if (!cell.parentElement || ![...cell.parentElement.children].filter(visible).some(element =>
-        element !== cell && names.some(name => name.test(text(element))))) cell = null;
-    }
-    const box = cell?.getBoundingClientRect();
-    return box ? { left: box.left, right: box.right } : {
-      left: index ? (centers[index - 1] + centers[index]) / 2 : centers[0] - (centers[1] - centers[0]) / 2,
-      right: index < 2 ? (centers[index] + centers[index + 1]) / 2 : centers[2] + (centers[2] - centers[1]) / 2
-    };
-  });
-  const numbers = leaves.filter(element => /^(?:[\d\s.,\u00a0\u202f]+(?:[kmb]|тыс\.?|млн\.?|млрд\.?)?|[—–-])$/i.test(text(element)));
-  const column = (element, index) => {
-    const box = element.getBoundingClientRect();
-    const center = box.left + box.width / 2;
-    return box.top > boxes[0].bottom && center >= bounds[index].left && center < bounds[index].right;
-  };
-  const views = numbers.filter(element => column(element, 0));
-  const rows = [];
-  const seen = new Set();
-  for (const view of views) {
-    let row = view.closest('tr, [role="row"]');
-    if (!row) {
-      row = view.parentElement;
-      while (row && row.tagName !== 'BODY') {
-        if (numbers.some(element => row.contains(element) && column(element, 1)) &&
-          numbers.some(element => row.contains(element) && column(element, 2))) break;
-        row = row.parentElement;
-      }
-    }
-    if (!row || row.tagName === 'BODY' || row.tagName === 'HTML' || seen.has(row)) continue;
-    const cells = [0, 1, 2].map(index => numbers.filter(element => row.contains(element) && column(element, index)));
-    if (cells.some(entries => entries.length !== 1)) continue;
-    const link = [...row.querySelectorAll('a[href]')].find(element => /\/video\/\d+/.test(element.getAttribute('href')));
-    const content = leaves.filter(element => row.contains(element) && element.getBoundingClientRect().left < bounds[0].left)
-      .map(text).filter(value => value && !/^\d{1,2}:\d{2}$/.test(value) && !/^(Все|Only me|Everyone|Только я|Друзья|Friends)$/.test(value));
-    const title = (link && text(link)) || content.find(value => !/^\d/.test(value)) || content[0];
-    if (!title) continue;
-    let url = null;
-    if (link) {
-      const candidate = new URL(link.getAttribute('href'), location.href);
-      if (candidate.origin === 'https://www.tiktok.com' && /\/video\/\d+/.test(candidate.pathname)) url = candidate.origin + candidate.pathname;
-    }
-    seen.add(row);
-    rows.push({ title: title.slice(0, 2200), url, views: text(cells[0][0]), likes: text(cells[1][0]), comments: text(cells[2][0]) });
-  }
-  if (diagnostic) return { headers: headers.map(entries => entries.length), aligned: aligned.length,
-    columns: bounds.map(box => ({ left: Math.round(box.left), right: Math.round(box.right) })), numericCandidates: numbers.length, rows: rows.length };
-  if (rows.length) return { rows };
-  if (/Нет публикаций|Нет видео|No posts|No videos/i.test(document.body.innerText)) return { rows: [] };
-  return false;
+function parseStudioDate(text, scheduled, now = new Date()) {
+  const months = ['янв|jan', 'фев|feb', 'мар|mar', 'апр|apr', 'май|мая|may', 'июн|jun', 'июл|jul', 'авг|aug', 'сен|sep', 'окт|oct', 'ноя|nov', 'дек|dec'];
+  const normalized = String(text).toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ').trim();
+  const match = normalized.match(/^(?:(\d{1,2})\s+([а-яa-z]+)|([a-z]+)\s+(\d{1,2}))(?:,?\s+(\d{4}))?,?\s+(\d{1,2}):(\d{2})(?:\s*(am|pm))?$/i);
+  if (!match) return null;
+  const day = Number(match[1] || match[4]);
+  const month = months.findIndex(pattern => new RegExp(`^(?:${pattern})`).test(match[2] || match[3]));
+  let hour = Number(match[6]);
+  if (match[8]) { if (hour < 1 || hour > 12) return null; hour = hour % 12 + (match[8] === 'pm' ? 12 : 0); }
+  const minute = Number(match[7]);
+  if (month < 0 || hour > 23 || minute > 59) return null;
+  const year = Number(match[5] || now.getFullYear());
+  const years = match[5] ? [year] : [year - 1, year, year + 1];
+  const dates = years.map(y => new Date(y, month, day, hour, minute)).filter(date => date.getMonth() === month && date.getDate() === day);
+  const candidates = scheduled ? dates : dates.filter(date => date.getTime() <= now.getTime() + 300000);
+  candidates.sort((a, b) => scheduled ? Math.abs(a - now) - Math.abs(b - now) : b - a);
+  return candidates[0]?.toISOString() || null;
 }
 
-async function readStudioStatistics(page, account, { timeoutMs = 30000 } = {}) {
-  let result;
-  try { result = await page.waitForFunction(inspectStatistics, null, { timeout: timeoutMs, polling: 500 }); }
-  catch { throw new Error('studio_statistics_unavailable'); }
-  let raw;
-  try { raw = await result.jsonValue(); } finally { await result.dispose(); }
-  const videos = raw.rows.map(row => ({ ...row, views: parseMetric(row.views), likes: parseMetric(row.likes), comments: parseMetric(row.comments) }));
-  if (videos.some(row => [row.views, row.likes, row.comments].some(value => value === null))) throw new Error('studio_statistics_unavailable');
-  return { account, updatedAt: new Date().toISOString(), scope: 'content_page', videos };
+// Runs in Studio. Only date badges are read; captions and per-video metrics are excluded.
+function inspectTimeline({ advance = false, reset = false } = {}) {
+  const visible = element => element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden';
+  const badges = [...document.querySelectorAll('[data-tt="components_PublishStageLabel_TUXText"]')].filter(visible);
+  if (!badges.length && !/Нет публикаций|Нет видео|No posts|No videos/i.test(document.body.innerText)) return false;
+  const dates = badges.map(element => ({ text: element.innerText.trim(), scheduled: !!element.parentElement.querySelector('[data-icon="Alarm"], [data-testid="Alarm"]') }));
+  let scroller = badges[0]?.parentElement;
+  while (scroller && !(scroller.scrollHeight > scroller.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(scroller).overflowY))) scroller = scroller.parentElement;
+  scroller ||= document.scrollingElement;
+  const bottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
+  const position = `${scroller.scrollTop}:${scroller.scrollHeight}`;
+  if (reset) scroller.scrollTop = 0;
+  else if (advance) scroller.scrollTop += Math.max(100, scroller.clientHeight * 0.75);
+  return { dates, bottom, position };
+}
+
+function inspectAnalytics(days) {
+  const period = [...document.querySelectorAll('button')].some(button => new RegExp(`^(?:Последние ${days} дн\\.|Last ${days} days)$`, 'i').test(button.innerText.trim()));
+  if (!period) return false;
+  const cards = [...document.querySelectorAll('button[data-tt="OverviewPage_AccountMetricsCard_Clickable"]')];
+  const names = { views: /^(Просмотры видео|Просмотры публикаций|Video views|Post views)$/i, likes: /^(Лайки|Likes)$/i, comments: /^(Комментарии|Comments)$/i };
+  const metrics = {};
+  for (const [key, name] of Object.entries(names)) {
+    const matches = cards.filter(card => [...card.querySelectorAll('*')].some(element => name.test(element.textContent.trim())));
+    if (matches.length !== 1) return false;
+    const value = matches[0].querySelector('.absolute-value')?.textContent.trim();
+    if (!value) return false;
+    metrics[key] = value;
+  }
+  return metrics;
+}
+
+async function waitValue(page, fn, arg, timeout) {
+  const handle = await page.waitForFunction(fn, arg, { timeout, polling: 250 });
+  try { return await handle.jsonValue(); } finally { await handle.dispose(); }
+}
+
+async function readStudioStatistics(page, account, { days = 7, timeoutMs = 30000, timelineTimeoutMs = 120000, now = new Date() } = {}) {
+  if (!PERIODS.includes(days)) throw new Error('invalid_statistics_period');
+  try {
+    await waitValue(page, inspectTimeline, {}, timeoutMs);
+    await page.evaluate(inspectTimeline, { reset: true });
+    let lastPublishedAt = null, lastScheduledAt = null, stableBottom = 0, previousPosition, complete = false;
+    const deadline = Date.now() + timelineTimeoutMs;
+    while (Date.now() < deadline) {
+      const state = await page.evaluate(inspectTimeline, {});
+      if (!state) { await page.waitForTimeout(400); continue; }
+      for (const badge of state.dates) {
+        const date = parseStudioDate(badge.text, badge.scheduled, now);
+        if (!date) throw new Error('studio_statistics_unavailable');
+        if (badge.scheduled) { if (!lastScheduledAt || date > lastScheduledAt) lastScheduledAt = date; }
+        else if (!lastPublishedAt || date > lastPublishedAt) lastPublishedAt = date;
+      }
+      stableBottom = state.bottom && state.position === previousPosition ? stableBottom + 1 : 0;
+      if (stableBottom >= 3) { complete = true; break; }
+      previousPosition = state.position;
+      await page.evaluate(inspectTimeline, { advance: true });
+      await page.waitForTimeout(state.bottom ? 1000 : 400);
+    }
+    if (!complete) throw new Error('studio_statistics_unavailable');
+    await page.goto('https://www.tiktok.com/tiktokstudio/analytics', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    const period = page.getByRole('button', { name: /^(Последние (7|28|60|365) дн\.|Last (7|28|60|365) days)$/i });
+    await period.waitFor({ timeout: timeoutMs });
+    const selected = (await period.innerText()).match(/\d+/)?.[0];
+    if (Number(selected) !== days) {
+      // Studio removes metric cards while the new range loads. Waiting for this
+      // transition prevents saving the old range under the newly selected label.
+      await page.locator('.absolute-value').first().waitFor({ timeout: timeoutMs });
+      const oldValue = await page.locator('.absolute-value').first().elementHandle();
+      try {
+        await period.click();
+        await page.getByText(new RegExp(`^(Последние ${days} дн\\.|Last ${days} days)$`, 'i')).filter({ visible: true }).last().click();
+        await page.waitForFunction(element => !element.isConnected, oldValue, { timeout: timeoutMs });
+      } finally { await oldValue?.dispose(); }
+    }
+    const raw = await waitValue(page, inspectAnalytics, days, timeoutMs);
+    const metrics = {};
+    for (const key of ['views', 'likes', 'comments']) {
+      metrics[key] = parseMetric(raw[key]);
+      if (metrics[key] === null && !/^[—–-]+$/.test(raw[key])) throw new Error('studio_statistics_unavailable');
+    }
+    return { account, days, updatedAt: new Date().toISOString(), scope: 'account_summary', lastPublishedAt, lastScheduledAt, metrics };
+  } catch (error) {
+    if (error.message === 'invalid_statistics_period') throw error;
+    throw new Error('studio_statistics_unavailable');
+  }
 }
 
 async function writeStatisticsDiagnostic(page, account, stage, error, file) {
   if (!file) return;
   try {
     const url = new URL(page?.url() || 'about:blank');
-    const layout = await page?.evaluate(inspectStatistics, { diagnostic: true }).catch(() => null);
+    const layout = await page?.evaluate(() => ({ dateBadges: document.querySelectorAll('[data-tt="components_PublishStageLabel_TUXText"]').length,
+      metricCards: document.querySelectorAll('button[data-tt="OverviewPage_AccountMetricsCard_Clickable"]').length }), { diagnostic: true }).catch(() => null);
     const report = { recordedAt: new Date().toISOString(), account, stage,
-      error: /^[a-z_]{1,100}$/.test(error.message) ? error.message : 'studio_statistics_unavailable',
-      page: url.origin + url.pathname, layout };
+      error: /^[a-z_]{1,100}$/.test(error.message) ? error.message : 'studio_statistics_unavailable', page: url.origin + url.pathname, layout };
     await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.writeFile(file, JSON.stringify(report, null, 2), { mode: 0o600 });
   } catch { /* Diagnostic failures must not replace the original error. */ }
@@ -120,22 +138,27 @@ function createStatisticsStore(file, read) {
   const get = async () => {
     try {
       const data = JSON.parse(await fs.readFile(file, 'utf8'));
-      if (data.version !== 1 || !Array.isArray(data.accounts)) throw new Error();
+      if (![1, 2].includes(data.version) || !Array.isArray(data.accounts)) throw new Error();
+      // Legacy per-video snapshots cannot represent period analytics. Keep the
+      // file intact until a successful refresh writes a real account summary.
+      if (data.version === 1) return { version: 2, accounts: [] };
       if (data.accounts.some(entry => !entry || !/^[a-zA-Z0-9_.]{2,64}$/.test(entry.account) ||
-        !Number.isFinite(Date.parse(entry.updatedAt)) || entry.scope !== 'content_page' || !Array.isArray(entry.videos) ||
-        entry.videos.some(video => !video || typeof video.title !== 'string' ||
-          ['views', 'likes', 'comments'].some(key => !Number.isSafeInteger(video[key]) || video[key] < 0)))) throw new Error();
+        !Number.isFinite(Date.parse(entry.updatedAt)) || entry.scope !== 'account_summary' || !PERIODS.includes(entry.days) ||
+        ['lastPublishedAt', 'lastScheduledAt'].some(key => entry[key] !== null && !Number.isFinite(Date.parse(entry[key]))) ||
+        !entry.metrics || ['views', 'likes', 'comments'].some(key => entry.metrics[key] !== null && (!Number.isSafeInteger(entry.metrics[key]) || entry.metrics[key] < 0)))) throw new Error();
       return data;
     } catch (error) {
-      if (error.code === 'ENOENT') return { version: 1, accounts: [] };
+      if (error.code === 'ENOENT') return { version: 2, accounts: [] };
       throw new Error('statistics_storage_error');
     }
   };
-  return { get, refresh(id) {
+  return { get, refresh(input) {
     const operation = serial.then(async () => {
-      const snapshot = await read(id);
+      const { id, days = 7 } = typeof input === 'string' ? { id: input } : input || {};
+      if (typeof id !== 'string' || !PERIODS.includes(days)) throw new Error('invalid_statistics_period');
+      const snapshot = await read(id, days);
       const data = await get();
-      data.accounts = data.accounts.filter(entry => entry.account !== snapshot.account);
+      data.accounts = data.accounts.filter(entry => entry.account !== snapshot.account || entry.days !== snapshot.days);
       data.accounts.push(snapshot);
       await fs.mkdir(path.dirname(file), { recursive: true });
       await fs.writeFile(`${file}.tmp`, JSON.stringify(data, null, 2), { mode: 0o600 });
@@ -147,4 +170,4 @@ function createStatisticsStore(file, read) {
   } };
 }
 
-module.exports = { parseMetric, inspectStatistics, readStudioStatistics, createStatisticsStore, writeStatisticsDiagnostic };
+module.exports = { PERIODS, parseMetric, parseStudioDate, inspectTimeline, inspectAnalytics, readStudioStatistics, createStatisticsStore, writeStatisticsDiagnostic };

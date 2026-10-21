@@ -4,12 +4,12 @@
   const api = window.api.tiktok.queue;
   const strings = {
     ru: {
-      statisticsTitle: 'Статистика TikTok', statisticsRefresh: 'Обновить статистику', statisticsEmpty: 'Статистика ещё не загружалась.',
-      statisticsScope: 'Данные по роликам на текущей странице списка TikTok Studio, не по всей истории канала.',
+      statisticsTitle: 'Статистика TikTok', statisticsRefresh: 'Обновить статистику', statisticsEmpty: 'Статистика за этот период ещё не загружалась.',
+      statisticsScope: 'Общие показатели аккаунта за выбранный период из аналитики TikTok Studio.',
       statisticsUpdated: 'Статистика сохранена.', statisticsWorking: 'Обновляю статистику. Если загружается ролик, дождусь завершения его отправки.',
-      statisticsDate: 'Обновлено', statisticsVideo: 'Ролик', statisticsViews: 'Просмотры', statisticsLikes: 'Лайки', statisticsComments: 'Комментарии',
-      statisticsAccount: 'Аккаунт статистики', statisticsCount: 'Считано роликов',
-      studio_statistics_unavailable: 'Не удалось прочитать статистику Studio. Предыдущие данные сохранены. Проверьте вход и доступность списка публикаций.',
+      statisticsDate: 'Обновлено', statisticsViews: 'Просмотры', statisticsLikes: 'Лайки', statisticsComments: 'Комментарии',
+      statisticsPeriod: 'Период', statisticsDays: 'дней', statisticsPublished: 'Последний опубликованный ролик', statisticsScheduled: 'Последний ролик в расписании', statisticsNone: 'Нет роликов', statisticsUnavailable: '— означает: TikTok не предоставил показатель.', invalid_statistics_period: 'Выберите доступный период статистики.', statisticsAccount: 'Аккаунт статистики',
+      studio_statistics_unavailable: 'Не удалось прочитать статистику Studio. Предыдущие данные сохранены. Проверьте вход и доступ к аналитике Studio.',
       statistics_storage_error: 'Не удалось прочитать или сохранить статистику.',
       applySchedule: 'Сохранить и применить время ко всем черновикам',
       applyScheduleHint: 'Распределяет время у готовых черновиков по первой дате и интервалу. Занятые слоты пропускаются. Описания и остальные настройки роликов сохраняются.',
@@ -87,12 +87,12 @@
       studio_interrupted_check_status: 'Загрузка прервана. Проверьте TikTok перед повторной отправкой.'
     },
     en: {
-      statisticsTitle: 'TikTok statistics', statisticsRefresh: 'Refresh statistics', statisticsEmpty: 'Statistics have not been loaded yet.',
-      statisticsScope: 'Videos on the current TikTok Studio content page, not the channel’s entire history.',
+      statisticsTitle: 'TikTok statistics', statisticsRefresh: 'Refresh statistics', statisticsEmpty: 'Statistics for this period have not been loaded yet.',
+      statisticsScope: 'Overall account metrics for the selected period from TikTok Studio analytics.',
       statisticsUpdated: 'Statistics saved.', statisticsWorking: 'Refreshing statistics. Any active video upload will finish first.',
-      statisticsDate: 'Updated', statisticsVideo: 'Video', statisticsViews: 'Views', statisticsLikes: 'Likes', statisticsComments: 'Comments',
-      statisticsAccount: 'Statistics account', statisticsCount: 'Videos read',
-      studio_statistics_unavailable: 'Could not read Studio statistics. Previous data is kept. Check sign-in and the content list.',
+      statisticsDate: 'Updated', statisticsViews: 'Views', statisticsLikes: 'Likes', statisticsComments: 'Comments',
+      statisticsPeriod: 'Period', statisticsDays: 'days', statisticsPublished: 'Latest published video', statisticsScheduled: 'Latest scheduled video', statisticsNone: 'No videos', statisticsUnavailable: '— means TikTok did not provide this metric.', invalid_statistics_period: 'Choose an available statistics period.', statisticsAccount: 'Statistics account',
+      studio_statistics_unavailable: 'Could not read Studio statistics. Previous data is kept. Check sign-in and Studio analytics access.',
       statistics_storage_error: 'Could not read or save statistics.',
       applySchedule: 'Save and apply timing to all drafts',
       applyScheduleHint: 'Assigns draft times using the first date and interval, skipping occupied slots. Video captions and other settings are kept.',
@@ -155,6 +155,7 @@
   let accounts = [];
   let statistics = { accounts: [] };
   let statisticsAccountId;
+  let statisticsDays = 7;
   let loginBrowser = 'msedge';
   let selected = null;
   let templateOpen;
@@ -378,32 +379,49 @@
       const replacement = statisticsCard(); card.replaceWith(replacement); window.SharpSelect?.mountAll(replacement);
     });
     group.append(label, choice); tools.append(group);
+    const periodGroup = el('div', '', 'field-group');
+    const periodLabel = el('label', tr('statisticsPeriod'), 'field-label'); periodLabel.htmlFor = 'tq-statistics-period';
+    const period = el('select'); period.id = periodLabel.htmlFor;
+    for (const days of [7, 28, 60, 365]) period.add(new Option(`${days} ${tr('statisticsDays')}`, String(days)));
+    period.value = String(statisticsDays);
+    period.addEventListener('change', () => {
+      statisticsDays = Number(period.value);
+      const replacement = statisticsCard(); card.replaceWith(replacement); window.SharpSelect?.mountAll(replacement);
+    });
+    periodGroup.append(periodLabel, period); tools.append(periodGroup);
     const update = button('statisticsRefresh', () => perform(async () => {
       status.textContent = tr('statisticsWorking');
-      statistics = await result(api.refreshStatistics(choice.value));
+      statistics = await result(api.refreshStatistics({ id: choice.value, days: statisticsDays }));
       const replacement = statisticsCard(); card.replaceWith(replacement); window.SharpSelect?.mountAll(replacement);
       status.textContent = tr('statisticsUpdated');
     }));
     update.disabled = !available.length; tools.append(update); card.append(tools);
     const account = available.find(entry => entry.id === statisticsAccountId)?.username;
-    const snapshot = statistics.accounts.find(entry => entry.account === account);
+    const summaries = statistics.accounts.filter(entry => entry.account === account && entry.scope === 'account_summary');
+    const snapshot = summaries.find(entry => entry.days === statisticsDays);
+    const latest = [...summaries].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
+    const dates = el('div', '', 'statistics-dates');
+    for (const [key, title] of [['lastPublishedAt', 'statisticsPublished'], ['lastScheduledAt', 'statisticsScheduled']]) {
+      const block = el('div', '', 'statistics-summary'); block.append(el('span', tr(title), 'hint'));
+      const value = latest?.[key];
+      const time = el('time', value ? new Date(value).toLocaleString(lang) : latest ? tr('statisticsNone') : '—');
+      if (value) time.dateTime = value;
+      block.append(time); dates.append(block);
+    }
+    card.append(dates);
     if (!snapshot) { card.append(el('p', tr('statisticsEmpty'), 'hint')); return card; }
-    card.append(el('p', `${tr('statisticsDate')}: ${new Date(snapshot.updatedAt).toLocaleString(lang)} · ${tr('statisticsCount')}: ${snapshot.videos.length}`, 'hint'));
-    const wrapper = el('div', '', 'statistics-table-scroll');
-    const table = el('table', '', 'statistics-table');
-    const head = el('thead'); const labels = el('tr');
-    for (const key of ['statisticsVideo', 'statisticsViews', 'statisticsLikes', 'statisticsComments']) {
-      const cell = el('th', tr(key)); cell.scope = 'col'; labels.append(cell);
+    card.append(el('p', `${tr('statisticsDate')}: ${new Date(snapshot.updatedAt).toLocaleString(lang)}`, 'hint'));
+    const metrics = el('div', '', 'statistics-metrics');
+    for (const [key, label] of [['views', 'statisticsViews'], ['likes', 'statisticsLikes'], ['comments', 'statisticsComments']]) {
+      const block = el('div', '', 'statistics-summary'); block.dataset.metric = key;
+      block.append(el('span', tr(label), 'hint'), el('strong', snapshot.metrics[key] === null ? '—' : snapshot.metrics[key].toLocaleString(lang)));
+      metrics.append(block);
     }
-    head.append(labels); table.append(head);
-    const body = el('tbody');
-    for (const video of snapshot.videos) {
-      const row = el('tr'); row.append(el('td', video.title));
-      for (const key of ['views', 'likes', 'comments']) row.append(el('td', Number(video[key]).toLocaleString(lang)));
-      body.append(row);
-    }
-    table.append(body); wrapper.append(table); card.append(wrapper); return card;
+    card.append(metrics);
+    if (Object.values(snapshot.metrics).some(value => value === null)) card.append(el('p', tr('statisticsUnavailable'), 'hint'));
+    return card;
   }
+
   function render() {
     const scroller = root.closest('.tab-content');
     const scrollTop = scroller?.scrollTop;

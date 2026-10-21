@@ -465,7 +465,7 @@ function createProfileDriver({ profilePath, statisticsDiagnosticPath, browser = 
       loginSession = await loginLaunch(profilePath, browser);
       return { open: true };
     },
-    async statistics(expectedAccount) {
+    async statistics(expectedAccount, days = 7) {
       let probe;
       let probeContext;
       let stage = 'browser';
@@ -481,7 +481,7 @@ function createProfileDriver({ profilePath, statisticsDiagnosticPath, browser = 
         const account = await readStudioAccount(probe).catch(() => { throw new Error('studio_account_unavailable'); });
         if (account !== expectedAccount) throw new Error('studio_account_mismatch');
         stage = 'counters';
-        return await readStudioStatistics(probe, account);
+        return await readStudioStatistics(probe, account, { days });
       } catch (error) {
         await writeStatisticsDiagnostic(probe, expectedAccount, stage, error, statisticsDiagnosticPath);
         throw error;
@@ -605,13 +605,13 @@ function createStudioDriver({ profilePath, launch, loginLaunch, profileOpen }) {
   }
   return {
     accounts: () => transact(async () => accountList()),
-    statistics: (id) => transact(async () => {
+    statistics: (id, days = 7) => transact(async () => {
       // Upload completion does not need this transaction lock. Waiting here
       // keeps the next upload queued until the separate statistics tab closes.
       await uploadFinished;
       const entry = entries.find(item => item.id === id && item.username);
       if (!entry) throw new Error('studio_account_unavailable');
-      return driver(entry).statistics(entry.username);
+      return driver(entry).statistics(entry.username, days);
     }),
     open: (id = 'default') => transact(async () => {
       if (uploading) throw new Error('operation_in_progress');

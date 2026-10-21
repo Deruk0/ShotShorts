@@ -8,7 +8,7 @@ const { createStatisticsStore } = require('./tiktok-statistics');
 
 function register({ app, ipcMain, safeStorage, shell, getWindow }) {
   const studio = createStudioDriver({ profilePath: path.join(app.getPath('userData'), 'tiktok-studio-profile') });
-  const statistics = createStatisticsStore(path.join(app.getPath('userData'), 'tiktok-statistics.json'), id => studio.statistics(id));
+  const statistics = createStatisticsStore(path.join(app.getPath('userData'), 'tiktok-statistics.json'), (id, days) => studio.statistics(id, days));
   for (const method of ['get', 'refresh']) {
     ipcMain.handle(`tiktok:statistics:${method}`, async (event, payload) => {
       const win = getWindow();

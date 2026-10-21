@@ -70,10 +70,10 @@ const path = require('node:path');
       ipcMain.removeHandler('tiktok:statistics:get');
       ipcMain.handle('tiktok:statistics:get', () => ({ success: true, data: global.__statisticsSnapshot }));
       ipcMain.removeHandler('tiktok:statistics:refresh');
-      ipcMain.handle('tiktok:statistics:refresh', async (_event, id) => {
-        global.__statisticsRequests.push(id);
-        global.__statisticsSnapshot = { version: 1, accounts: [{ account: 'fixture_account', updatedAt: '2026-10-20T12:00:00Z',
-          scope: 'content_page', videos: [{ title: 'Статистика тестового ролика', views: 1200, likes: 30, comments: 2 }] }] };
+      ipcMain.handle('tiktok:statistics:refresh', async (_event, input) => {
+        global.__statisticsRequests.push(input);
+        global.__statisticsSnapshot = { version: 2, accounts: [{ account: 'fixture_account', days: input.days, updatedAt: '2026-10-20T12:00:00Z',
+          scope: 'account_summary', lastPublishedAt: '2026-10-20T11:00:00Z', lastScheduledAt: '2026-10-23T07:00:00Z', metrics: { views: input.days === 60 ? 4200 : 1200, likes: 30, comments: null } }] };
         return { success: true, data: global.__statisticsSnapshot };
       });
       ipcMain.removeHandler('media:probe');
@@ -160,9 +160,16 @@ const path = require('node:path');
     assert.equal(defaultsPlan.data.template.account, 'fixture_account');
     assert.equal(defaultsPlan.data.items[0].settings.title, 'Individual queue caption');
     await page.getByRole('button', { name: 'Обновить статистику', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('.statistics-table tbody')?.textContent.includes('Статистика тестового ролика'));
-    assert.deepEqual(await electron.evaluate(() => global.__statisticsRequests), ['default']);
-    assert.equal(await page.locator('.statistics-table tbody tr').count(), 1);
+    await page.waitForFunction(() => document.querySelector('[data-metric="views"] strong')?.textContent.includes('1'));
+    assert.deepEqual(await electron.evaluate(() => global.__statisticsRequests), [{ id: 'default', days: 7 }]);
+    assert.equal(await page.locator('.statistics-table').count(), 0);
+    assert.equal(await page.locator('.statistics-dates time[datetime]').count(), 2);
+    assert.equal(await page.locator('[data-metric="comments"] strong').innerText(), '—');
+    await page.selectOption('#tq-statistics-period', '60', { force: true });
+    assert.equal(await page.locator('.statistics-metrics').count(), 0, 'A new period must not reuse another range');
+    await page.getByRole('button', { name: 'Обновить статистику', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('[data-metric="views"] strong')?.textContent.includes('4'));
+    assert.deepEqual(await electron.evaluate(() => global.__statisticsRequests), [{ id: 'default', days: 7 }, { id: 'default', days: 60 }]);
     await page.locator('.queue-statistics').screenshot({ path: path.join(os.tmpdir(), 'shotshorts-tiktok-statistics.png'), animations: 'disabled' });
     const statisticsQueue = (await page.evaluate(() => window.api.tiktok.queue.get())).data;
     assert.deepEqual(statisticsQueue.items, defaultsPlan.data.items);
